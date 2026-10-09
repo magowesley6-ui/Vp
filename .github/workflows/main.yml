@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       vnc_password:
-        description: "Senha VNC de 6 a 8 caracteres, letras e números"
+        description: "Senha VNC de 6 a 8 letras ou números"
         required: true
         type: string
 
@@ -21,44 +21,36 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
 
-    env:
-      DISK: /home/runner/mint/mint.qcow2
-      ISO: /home/runner/mint/linuxmint.iso
-      DISK_SIZE: 145G
-      CACHE_DIR: /home/runner/mint
-
     steps:
-      # ==========================================
+      # ========================================
       # 1. VALIDAR CONFIGURAÇÕES
-      # ==========================================
-      - name: Validar senha VNC
+      # ========================================
+      - name: Validar senha
         env:
           VNC_PASSWORD: ${{ inputs.vnc_password }}
         run: |
           set -Eeuo pipefail
 
           if [[ ! "$VNC_PASSWORD" =~ ^[A-Za-z0-9]{6,8}$ ]]; then
-            echo "ERRO: a senha deve ter de 6 a 8 letras ou números."
+            echo "ERRO: use de 6 a 8 letras ou números."
             exit 1
           fi
 
-          echo "Senha VNC validada."
+          echo "Senha validada."
 
-      # ==========================================
+      # ========================================
       # 2. CRIAR DIRETÓRIOS
-      # ==========================================
+      # ========================================
       - name: Preparar diretórios
         run: |
           set -Eeuo pipefail
 
-          mkdir -p "$CACHE_DIR"
-          mkdir -p "$HOME/.local/bin"
+          mkdir -p /home/runner/mint
+          mkdir -p "$RUNNER_TEMP"
 
-          echo "Diretórios preparados."
-
-      # ==========================================
+      # ========================================
       # 3. RESTAURAR DISCO ANTERIOR
-      # ==========================================
+      # ========================================
       - name: Restaurar disco virtual
         id: restore
         uses: actions/cache/restore@v4
@@ -69,9 +61,9 @@ jobs:
             extnobrasil-mint-${{ github.ref_name }}-
             extnobrasil-mint-
 
-      # ==========================================
+      # ========================================
       # 4. INSTALAR DEPENDÊNCIAS
-      # ==========================================
+      # ========================================
       - name: Instalar QEMU e noVNC
         run: |
           set -Eeuo pipefail
@@ -83,44 +75,42 @@ jobs:
             qemu-utils \
             novnc \
             websockify \
-            zstd \
             curl \
             wget \
             ca-certificates \
             procps \
             lsof \
-            jq \
             file \
             git
 
           echo "Dependências instaladas."
 
-      # ==========================================
-      # 5. BAIXAR CLOUDFLARED
-      # ==========================================
+      # ========================================
+      # 5. INSTALAR CLOUDFLARED
+      # ========================================
       - name: Instalar Cloudflare Tunnel
         run: |
           set -Eeuo pipefail
 
-          curl -fL \
-            --retry 3 \
-            --retry-delay 2 \
+          curl -fL --retry 3 \
             https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
-            -o "$HOME/.local/bin/cloudflared"
+            -o "$HOME/cloudflared"
 
-          chmod +x "$HOME/.local/bin/cloudflared"
+          chmod +x "$HOME/cloudflared"
 
-          "$HOME/.local/bin/cloudflared" --version
+          "$HOME/cloudflared" --version
 
-      # ==========================================
+      # ========================================
       # 6. BAIXAR LINUX MINT
-      # ==========================================
-      - name: Baixar ISO do Linux Mint
+      # ========================================
+      - name: Baixar ISO
         run: |
           set -Eeuo pipefail
 
+          ISO="/home/runner/mint/linuxmint.iso"
+
           if [[ ! -s "$ISO" ]]; then
-            echo "Baixando Linux Mint Cinnamon 22.3..."
+            echo "Baixando Linux Mint Cinnamon..."
 
             curl -fL \
               --retry 3 \
@@ -128,42 +118,40 @@ jobs:
               --connect-timeout 30 \
               https://pub.linuxmint.io/stable/22.3/linuxmint-22.3-cinnamon-64bit.iso \
               -o "$ISO"
-          else
-            echo "ISO já existe."
           fi
 
           if [[ "$(file -b "$ISO")" != *"ISO 9660"* ]]; then
-            echo "ERRO: o arquivo baixado não parece ser uma ISO válida."
+            echo "ERRO: ISO inválida ou download incompleto."
             exit 1
           fi
 
           echo "ISO pronta."
 
-      # ==========================================
-      # 7. CRIAR OU RECUPERAR DISCO VIRTUAL
-      # ==========================================
-      - name: Preparar disco virtual de 145 GB
+      # ========================================
+      # 7. PREPARAR DISCO
+      # ========================================
+      - name: Preparar disco de 145 GB
         run: |
           set -Eeuo pipefail
 
+          DISK="/home/runner/mint/mint.qcow2"
+
           if [[ -s "$DISK" ]]; then
-            echo "Disco virtual anterior encontrado."
+            echo "Disco restaurado."
             qemu-img info "$DISK"
           else
-            echo "Criando novo disco virtual..."
+            echo "Criando disco virtual..."
 
             qemu-img create \
               -f qcow2 \
               "$DISK" \
-              "$DISK_SIZE"
-
-            echo "Disco virtual criado."
+              145G
           fi
 
-      # ==========================================
+      # ========================================
       # 8. PREPARAR SENHA VNC
-      # ==========================================
-      - name: Preparar acesso VNC
+      # ========================================
+      - name: Preparar senha VNC
         env:
           VNC_PASSWORD: ${{ inputs.vnc_password }}
         run: |
@@ -174,25 +162,19 @@ jobs:
 
           chmod 600 "$RUNNER_TEMP/vnc-password"
 
-          echo "Senha VNC preparada."
-
-      # ==========================================
-      # 9. CRIAR SCRIPT DE PERSONALIZAÇÃO DO MINT
-      # ==========================================
-      - name: Criar instalador visual macOS
+      # ========================================
+      # 9. INSTALADOR VISUAL MACOS
+      # ========================================
+      - name: Preparar instalador visual
         run: |
           set -Eeuo pipefail
 
-          cat > "$RUNNER_TEMP/mint-macos-setup.sh" <<'MINT_SCRIPT'
+          cat > "$RUNNER_TEMP/mint-macos-setup.sh" <<'SCRIPT'
           #!/usr/bin/env bash
           set -Eeuo pipefail
 
-          echo "======================================"
-          echo " ExtNoBrasil - Visual macOS para Mint"
-          echo "======================================"
-
           if [[ $EUID -eq 0 ]]; then
-            echo "Execute este script dentro do Linux Mint, sem usar sudo no script inteiro."
+            echo "Execute como usuário normal dentro do Linux Mint."
             exit 1
           fi
 
@@ -200,32 +182,19 @@ jobs:
 
           sudo apt-get install -y \
             git \
-            curl \
             plank \
             gnome-tweaks
 
-          mkdir -p "$HOME/.themes"
-          mkdir -p "$HOME/.icons"
-          mkdir -p "$HOME/.config/autostart"
-
           cd "$HOME"
 
-          if [[ -d WhiteSur-gtk-theme/.git ]]; then
-            git -C WhiteSur-gtk-theme pull --ff-only
-          else
-            git clone \
-              --depth 1 \
-              https://github.com/vinceliuice/WhiteSur-gtk-theme.git \
-              WhiteSur-gtk-theme
+          if [[ ! -d WhiteSur-gtk-theme/.git ]]; then
+            git clone --depth 1 \
+              https://github.com/vinceliuice/WhiteSur-gtk-theme.git
           fi
 
-          if [[ -d WhiteSur-icon-theme/.git ]]; then
-            git -C WhiteSur-icon-theme pull --ff-only
-          else
-            git clone \
-              --depth 1 \
-              https://github.com/vinceliuice/WhiteSur-icon-theme.git \
-              WhiteSur-icon-theme
+          if [[ ! -d WhiteSur-icon-theme/.git ]]; then
+            git clone --depth 1 \
+              https://github.com/vinceliuice/WhiteSur-icon-theme.git
           fi
 
           cd "$HOME/WhiteSur-gtk-theme"
@@ -233,6 +202,8 @@ jobs:
 
           cd "$HOME/WhiteSur-icon-theme"
           ./install.sh
+
+          mkdir -p "$HOME/.config/autostart"
 
           cat > "$HOME/.config/autostart/plank.desktop" <<'DESKTOP'
           [Desktop Entry]
@@ -242,87 +213,78 @@ jobs:
           X-GNOME-Autostart-enabled=true
           DESKTOP
 
-          echo
-          echo "Instalação visual concluída."
-          echo "Abra as configurações de temas para selecionar o tema WhiteSur."
-          echo "Saia e entre novamente na sessão se necessário."
-          MINT_SCRIPT
+          echo "Tema instalada. Configure-a nas configurações do Mint."
+          SCRIPT
 
-          chmod 644 "$RUNNER_TEMP/mint-macos-setup.sh"
-
-          # CORREÇÃO DA PERMISSÃO:
-          # O diretório do noVNC pertence ao sistema.
+          # Corrige a permissão de escrita no diretório do noVNC.
           sudo install -D -m 644 \
             "$RUNNER_TEMP/mint-macos-setup.sh" \
             /usr/share/novnc/mint-macos-setup.sh
 
-          echo "Instalador visual publicado no noVNC."
+          echo "Instalador visual publicado."
 
-      # ==========================================
-      # 10. INICIAR O PC VIRTUAL
-      # ==========================================
-      - name: Iniciar PC Gamer Virtual
+      # ========================================
+      # 10. INICIAR PC VIRTUAL
+      # ========================================
+      - name: Iniciar PC Gamer
         env:
-          VNC_PASSWORD: ${{ inputs.vnc_password }}
+          CACHE_HIT: ${{ steps.restore.outputs.cache-hit }}
         run: |
           set -Eeuo pipefail
+
+          DISK="/home/runner/mint/mint.qcow2"
+          ISO="/home/runner/mint/linuxmint.iso"
+
+          QEMU_PID=""
+          VNC_PID=""
+          TUNNEL_PID=""
 
           cleanup() {
             echo "Encerrando serviços..."
 
-            if [[ -n "${QEMU_PID:-}" ]] &&
-               kill -0 "$QEMU_PID" 2>/dev/null; then
-              kill -TERM "$QEMU_PID" 2>/dev/null || true
-              wait "$QEMU_PID" 2>/dev/null || true
-            fi
+            for pid in "$TUNNEL_PID" "$VNC_PID" "$QEMU_PID"; do
+              if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+                kill -TERM "$pid" 2>/dev/null || true
+              fi
+            done
 
-            if [[ -n "${NOVNC_PID:-}" ]]; then
-              kill "$NOVNC_PID" 2>/dev/null || true
-            fi
-
-            if [[ -n "${CLOUDFLARED_PID:-}" ]]; then
-              kill "$CLOUDFLARED_PID" 2>/dev/null || true
-            fi
+            for pid in "$TUNNEL_PID" "$VNC_PID" "$QEMU_PID"; do
+              if [[ -n "$pid" ]]; then
+                wait "$pid" 2>/dev/null || true
+              fi
+            done
 
             rm -f "$RUNNER_TEMP/vnc-password"
           }
 
           trap cleanup EXIT
 
-          # Detectar aceleração de hardware
-          if [[ -e /dev/kvm ]]; then
-            sudo chmod 666 /dev/kvm || true
-          fi
+          # Usar poucos recursos para evitar congelamento.
+          RAM_MB=4096
+          CPU_COUNT=2
 
-          if [[ -r /dev/kvm && -w /dev/kvm ]]; then
+          if [[ -e /dev/kvm ]] &&
+             [[ -r /dev/kvm ]] &&
+             [[ -w /dev/kvm ]]; then
             ACCEL_ARGS=(-accel kvm)
             echo "Aceleração KVM disponível."
           else
-            ACCEL_ARGS=(-accel tcg,thread=multi)
-            echo "KVM indisponível. Usando emulação TCG."
+            ACCEL_ARGS=(-accel tcg,thread=single)
+            echo "KVM indisponível: emulação TCG ativada."
+            echo "O desempenho gráfico poderá ser baixo."
           fi
 
-          CPU_COUNT="$(nproc)"
-
-          if (( CPU_COUNT < 1 )); then
-            CPU_COUNT=2
+          # Se houver disco restaurado, iniciar pelo disco.
+          # Na primeira execução, iniciar pela ISO.
+          if [[ "$CACHE_HIT" == "true" ]]; then
+            BOOT_ORDER="c"
+            echo "Inicializando pelo disco restaurado."
+          else
+            BOOT_ORDER="dc"
+            echo "Primeira execução: inicializando pela ISO."
           fi
-
-          RAM_MB=8192
-
-          echo "=========================================="
-          echo "       ExtNoBrasil PC Gamer"
-          echo "=========================================="
-          echo "Sistema: Linux Mint Cinnamon 22.3"
-          echo "CPU virtual: $CPU_COUNT vCPU"
-          echo "RAM virtual: $RAM_MB MB"
-          echo "Disco virtual: $DISK_SIZE"
-          echo "Acesso: noVNC pelo navegador"
-          echo "=========================================="
 
           # Iniciar QEMU.
-          # order=dc: tenta iniciar pelo disco; se necessário,
-          # usa a ISO para instalar o sistema.
           qemu-system-x86_64 \
             "${ACCEL_ARGS[@]}" \
             -machine q35 \
@@ -331,14 +293,13 @@ jobs:
             -m "$RAM_MB" \
             -drive "file=$DISK,if=virtio,format=qcow2" \
             -cdrom "$ISO" \
-            -boot order=dc \
+            -boot "order=$BOOT_ORDER" \
             -vga std \
             -display none \
             -device e1000,netdev=net0 \
             -netdev user,id=net0 \
             -object "secret,id=vncpw,file=$RUNNER_TEMP/vnc-password" \
             -vnc "127.0.0.1:0,password-secret=vncpw" \
-            -no-reboot \
             > "$RUNNER_TEMP/qemu.log" 2>&1 &
 
           QEMU_PID=$!
@@ -346,52 +307,51 @@ jobs:
           sleep 5
 
           if ! kill -0 "$QEMU_PID" 2>/dev/null; then
-            echo "ERRO: o QEMU não iniciou."
+            echo "ERRO: QEMU não iniciou."
             cat "$RUNNER_TEMP/qemu.log"
             exit 1
           fi
 
-          # Iniciar servidor noVNC
+          # Iniciar noVNC.
           websockify \
             --web=/usr/share/novnc \
             6080 \
             127.0.0.1:5900 \
             > "$RUNNER_TEMP/novnc.log" 2>&1 &
 
-          NOVNC_PID=$!
+          VNC_PID=$!
 
           sleep 3
 
-          if ! kill -0 "$NOVNC_PID" 2>/dev/null; then
-            echo "ERRO: o noVNC não iniciou."
+          if ! kill -0 "$VNC_PID" 2>/dev/null; then
+            echo "ERRO: noVNC não iniciou."
             cat "$RUNNER_TEMP/novnc.log"
             exit 1
           fi
 
-          # Iniciar Cloudflare Tunnel
-          "$HOME/.local/bin/cloudflared" tunnel \
+          # Iniciar túnel público.
+          "$HOME/cloudflared" tunnel \
             --url http://127.0.0.1:6080 \
             --no-autoupdate \
             > "$RUNNER_TEMP/cloudflared.log" 2>&1 &
 
-          CLOUDFLARED_PID=$!
+          TUNNEL_PID=$!
 
-          # Esperar a URL pública
           PUBLIC_URL=""
 
           for attempt in $(seq 1 60); do
             PUBLIC_URL="$(
               grep -oE 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
-                "$RUNNER_TEMP/cloudflared.log" \
-                | head -n 1 || true
+                "$RUNNER_TEMP/cloudflared.log" |
+                head -n 1 || true
             )"
 
             if [[ -n "$PUBLIC_URL" ]]; then
               break
             fi
 
-            if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
-              echo "ERRO: o Cloudflare Tunnel encerrou."
+            if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
+              echo "ERRO: Cloudflare Tunnel encerrou."
               cat "$RUNNER_TEMP/cloudflared.log"
               exit 1
             fi
@@ -400,64 +360,56 @@ jobs:
           done
 
           if [[ -z "$PUBLIC_URL" ]]; then
-            echo "ERRO: não foi possível obter a URL pública."
+            echo "ERRO: não foi possível obter o endereço público."
             cat "$RUNNER_TEMP/cloudflared.log"
             exit 1
           fi
 
           echo
-          echo "=========================================="
-          echo "       PC VIRTUAL INICIADO"
-          echo "=========================================="
-          echo
+          echo "========================================"
+          echo "   ExtNoBrasil PC Gamer iniciado"
+          echo "========================================"
           echo "Sistema: Linux Mint Cinnamon"
-          echo "Projeto: ExtNoBrasil PC Gamer"
+          echo "RAM virtual: 4 GB"
+          echo "CPU virtual: 2 núcleos"
           echo "Disco virtual: 145 GB"
-          echo "CPU virtual: $CPU_COUNT vCPU"
-          echo "RAM virtual: $RAM_MB MB"
           echo
           echo "ENDEREÇO DO PC:"
           echo "$PUBLIC_URL/vnc.html"
           echo
-          echo "Senha VNC: a senha informada ao iniciar o workflow"
+          echo "Senha VNC: a senha informada no workflow"
           echo
-          echo "INSTALADOR VISUAL MACOS:"
+          echo "INSTALADOR VISUAL:"
           echo "$PUBLIC_URL/mint-macos-setup.sh"
           echo
-          echo "IMPORTANTE:"
-          echo "- Não compartilhe o endereço público."
-          echo "- O disco precisa receber a instalação do Mint."
-          echo "- O primeiro início pode abrir o instalador Live."
-          echo "- Instale o Mint no disco virtual para persistir o sistema."
-          echo
-          echo "=========================================="
+          echo "Não compartilhe o endereço público."
+          echo "========================================"
 
-          # Manter a máquina funcionando por até 5h45,
-          # permitindo que o workflow finalize e salve o cache.
-          for ((elapsed=0; elapsed<20700; elapsed+=30)); do
+          # Monitorar o QEMU.
+          # Encerra antes do limite máximo do job.
+          for ((i=0; i<20700; i+=10)); do
             if ! kill -0 "$QEMU_PID" 2>/dev/null; then
-              echo "ERRO: o QEMU encerrou inesperadamente."
+              echo "ERRO: QEMU encerrou."
               tail -n 100 "$RUNNER_TEMP/qemu.log" || true
               exit 1
             fi
 
-            if ! kill -0 "$NOVNC_PID" 2>/dev/null; then
-              echo "ERRO: o noVNC encerrou inesperadamente."
+            if ! kill -0 "$VNC_PID" 2>/dev/null; then
+              echo "ERRO: noVNC encerrou."
               tail -n 100 "$RUNNER_TEMP/novnc.log" || true
               exit 1
             fi
 
-            sleep 30
+            sleep 10
           done
 
           echo "Tempo de execução concluído."
-          echo "O disco será preparado para o salvamento do cache."
 
-      # ==========================================
+      # ========================================
       # 11. SALVAR DISCO PARA PRÓXIMA EXECUÇÃO
-      # ==========================================
+      # ========================================
       - name: Salvar disco virtual
-        if: always() && steps.restore.outcome == 'success'
+        if: success()
         uses: actions/cache/save@v4
         with:
           path: /home/runner/mint/mint.qcow2
