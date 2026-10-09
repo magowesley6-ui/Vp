@@ -1,21 +1,12 @@
-name: ExtNoBrasil PC Gamer [BETA]
+name: ExtNoBrasil PC Gamer [BETA] - Lingmo OS
 
 on:
   workflow_dispatch:
     inputs:
       vnc_password:
-        description: "Senha VNC de 6 a 8 caracteres alfanuméricos"
+        description: "Senha VNC de 6 a 8 caracteres"
         required: true
         type: string
-
-      edition:
-        description: "Edicao do Zorin OS"
-        required: true
-        type: choice
-        options:
-          - core
-          - lite
-        default: lite
 
 permissions:
   contents: read
@@ -26,18 +17,17 @@ concurrency:
 
 jobs:
   pc-virtual:
-    name: ExtNoBrasil PC Gamer
+    name: ExtNoBrasil PC Gamer - Lingmo OS
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
     env:
       VM_NAME: "ExtNoBrasil PC Gamer [BETA]"
-      VM_DISK: "/home/runner/zorin/zorin.qcow2"
-      VM_DISK_SIZE: "145G"
-      SAVE_DIR: "/home/runner/zorin-save"
-      ZORIN_DIR: "/home/runner/zorin"
+      VM_DISK: /home/runner/lingmo/lingmo.qcow2
+      VM_DISK_SIZE: 145G
+      SAVE_DIR: /home/runner/lingmo-save
+      LINGMO_DIR: /home/runner/lingmo
       VNC_PASSWORD: ${{ inputs.vnc_password }}
-      EDITION: ${{ inputs.edition }}
 
     steps:
       # ==========================================
@@ -51,15 +41,11 @@ jobs:
 
           echo "=========================================="
           echo "   EXT NOBRASIL PC GAMER [BETA]"
+          echo "             LINGMO OS"
           echo "=========================================="
 
           if [[ ! "$VNC_PASSWORD" =~ ^[A-Za-z0-9]{6,8}$ ]]; then
             echo "ERRO: a senha precisa ter de 6 a 8 letras ou numeros."
-            exit 1
-          fi
-
-          if [[ "$EDITION" != "core" && "$EDITION" != "lite" ]]; then
-            echo "ERRO: edicao invalida."
             exit 1
           fi
 
@@ -78,16 +64,16 @@ jobs:
             lsof \
             jq
 
-          mkdir -p "$ZORIN_DIR"
+          mkdir -p "$LINGMO_DIR"
           mkdir -p "$SAVE_DIR"
 
-          echo "Preparacao concluida."
+          echo "Ambiente preparado."
 
       # ==========================================
-      # 2. DETECTAR RECURSOS
+      # 2. DETECTAR CPU, RAM E KVM
       # ==========================================
 
-      - name: Detectar CPU, RAM e KVM
+      - name: Detectar recursos
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -103,12 +89,7 @@ jobs:
             VM_CPU="$CPU_HOST"
           fi
 
-          # Reserva memoria para o sistema hospedeiro.
           VM_RAM=$((RAM_HOST - 2048))
-
-          if [[ "$VM_RAM" -gt 6144 ]]; then
-            VM_RAM=6144
-          fi
 
           if [[ "$VM_RAM" -gt 4096 ]]; then
             VM_RAM=4096
@@ -118,71 +99,57 @@ jobs:
             VM_RAM=1024
           fi
 
-          if [[ -r /dev/kvm ]] && [[ -w /dev/kvm ]]; then
-            ACCEL="kvm"
-            echo "Aceleracao KVM disponivel."
+          if [[ -r /dev/kvm && -w /dev/kvm ]]; then
+            ACCEL=kvm
           else
-            ACCEL="tcg"
-            echo "KVM indisponivel: usando TCG."
+            ACCEL=tcg
           fi
 
           echo "VM_CPU=$VM_CPU" >> "$GITHUB_ENV"
           echo "VM_RAM=$VM_RAM" >> "$GITHUB_ENV"
           echo "ACCEL=$ACCEL" >> "$GITHUB_ENV"
 
-          echo "CPU da VM: $VM_CPU"
-          echo "RAM da VM: ${VM_RAM} MB"
+          echo "CPU virtual: $VM_CPU"
+          echo "RAM virtual: ${VM_RAM} MB"
           echo "Aceleracao: $ACCEL"
 
       # ==========================================
-      # 3. RESTAURAR DISCO ANTERIOR
+      # 3. RESTAURAR BACKUP
       # ==========================================
 
       - name: Restaurar disco salvo
-        id: restore
         uses: actions/cache/restore@v4
         with:
-          path: /home/runner/zorin-save
-          key: extnobrasil-zorin-${{ github.ref_name }}-${{ github.run_id }}
+          path: /home/runner/lingmo-save
+          key: extnobrasil-lingmo-${{ github.ref_name }}-${{ github.run_id }}
           restore-keys: |
-            extnobrasil-zorin-${{ github.ref_name }}-
-            extnobrasil-zorin-
+            extnobrasil-lingmo-${{ github.ref_name }}-
+            extnobrasil-lingmo-
 
       - name: Preparar disco virtual
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          mkdir -p "$ZORIN_DIR"
+          mkdir -p "$LINGMO_DIR"
           mkdir -p "$SAVE_DIR"
 
-          RESTORED="false"
-
-          if [[ -f "$SAVE_DIR/zorin.qcow2.zst" ]]; then
-            echo "Backup compactado encontrado."
+          if [[ -f "$SAVE_DIR/lingmo.qcow2.zst" ]]; then
+            echo "Backup encontrado. Restaurando disco..."
 
             zstd -d -f \
-              "$SAVE_DIR/zorin.qcow2.zst" \
+              "$SAVE_DIR/lingmo.qcow2.zst" \
               -o "$VM_DISK"
 
-            RESTORED="true"
+            echo "RESTORED=true" >> "$GITHUB_ENV"
 
-          elif [[ -f "$SAVE_DIR/zorin.qcow2" ]]; then
-            echo "Backup de disco encontrado."
-
-            cp "$SAVE_DIR/zorin.qcow2" "$VM_DISK"
-            RESTORED="true"
-          fi
-
-          if [[ "$RESTORED" == "true" ]]; then
-            echo "Disco anterior restaurado."
-
-            qemu-img info "$VM_DISK"
+          elif [[ -f "$SAVE_DIR/lingmo.qcow2" ]]; then
+            cp "$SAVE_DIR/lingmo.qcow2" "$VM_DISK"
 
             echo "RESTORED=true" >> "$GITHUB_ENV"
+
           else
-            echo "Nenhum disco anterior encontrado."
-            echo "Criando disco virtual de 145 GB."
+            echo "Criando disco virtual de 145 GB..."
 
             qemu-img create \
               -f qcow2 \
@@ -192,146 +159,137 @@ jobs:
             echo "RESTORED=false" >> "$GITHUB_ENV"
           fi
 
+          qemu-img info "$VM_DISK"
+
       # ==========================================
-      # 4. BAIXAR O ZORIN OS
+      # 4. BAIXAR LINGMO OS
       # ==========================================
 
-      - name: Baixar ISO do Zorin OS
+      - name: Baixar ISO do Lingmo OS
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          case "$EDITION" in
-            core)
-              ISO_URL="https://distro.ibiblio.org/zorinos/18/Zorin-OS-18.1-Core-64-bit.iso"
-              ;;
-            lite)
-              ISO_URL="https://distro.ibiblio.org/zorinos/18/Zorin-OS-18.1-Lite-64-bit.iso"
-              ;;
-          esac
+          ISO_URL="https://sourceforge.net/projects/lingmo-os/files/release/iso/helium/3.0.5/lingmo-os-3.0.5-25R06-desktop-amd64.iso/download"
+          ISO_FILE="$LINGMO_DIR/lingmo.iso"
 
-          ISO_FILE="$ZORIN_DIR/zorin.iso"
+          echo "Baixando Lingmo OS 3.0.5..."
 
-          echo "Edicao selecionada: $EDITION"
-          echo "Verificando disponibilidade da ISO..."
-
-          if ! curl -fIL --retry 2 --connect-timeout 20 "$ISO_URL"; then
-            echo ""
-            echo "ERRO: o endereco da ISO nao esta disponivel."
-            echo "O link pode ter mudado ou a edicao pode nao existir nesse endereco."
-            echo "Consulte a pagina oficial de downloads do Zorin OS."
-            exit 1
-          fi
-
-          echo "Baixando ISO..."
-
-          curl -fL \
+          if ! curl -fL \
             --retry 3 \
             --connect-timeout 30 \
             --output "$ISO_FILE" \
-            "$ISO_URL"
+            "$ISO_URL"; then
+
+            echo "ERRO: nao foi possivel baixar a ISO."
+            echo "Confira os arquivos na pagina oficial do SourceForge."
+            exit 1
+          fi
 
           if [[ ! -s "$ISO_FILE" ]]; then
-            echo "ERRO: arquivo ISO vazio."
+            echo "ERRO: a ISO esta vazia."
+            exit 1
+          fi
+
+          FILE_TYPE="$(file -b "$ISO_FILE" 2>/dev/null || true)"
+
+          if [[ "$FILE_TYPE" == *HTML* ]]; then
+            echo "ERRO: o download retornou uma pagina HTML, nao a ISO."
             exit 1
           fi
 
           echo "ISO baixada."
+          ls -lh "$ISO_FILE"
 
       # ==========================================
-      # 5. PREPARAR SENHA VNC
+      # 5. CONFIGURAR SENHA VNC
       # ==========================================
 
-      - name: Preparar autenticacao VNC
+      - name: Preparar senha VNC
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          # A senha nao sera impressa nos logs.
           printf '%s' "$VNC_PASSWORD" > "$RUNNER_TEMP/vnc-password"
           chmod 600 "$RUNNER_TEMP/vnc-password"
 
-          # O QEMU utiliza um objeto secret.
-          # IMPORTANTE: nao usar password=on junto com password-secret.
-          echo "Autenticacao VNC preparada."
+          echo "Senha VNC configurada."
 
       # ==========================================
       # 6. INICIAR QEMU
       # ==========================================
 
-      - name: Iniciar PC virtual
+      - name: Iniciar Lingmo OS
         shell: bash
         run: |
           set -Eeuo pipefail
 
           SECRET_FILE="$RUNNER_TEMP/vnc-password"
 
-          if [[ "${RESTORED:-false}" == "true" ]]; then
-            echo "Inicializando pelo disco restaurado."
-            BOOT_ORDER="c"
+          if [[ "$RESTORED" == "true" ]]; then
+            echo "Iniciando pelo disco restaurado."
+            BOOT_ORDER=c
           else
-            echo "Inicializando pela ISO para instalar o sistema."
-            BOOT_ORDER="dc"
+            echo "Iniciando pela ISO do Lingmo OS."
+            BOOT_ORDER=dc
           fi
 
           QEMU_BIN="$(command -v qemu-system-x86_64)"
 
           QEMU_ARGS=(
             -name "$VM_NAME"
-            -machine "q35"
-            -cpu "max"
+            -machine q35
+            -cpu max
             -smp "$VM_CPU"
             -m "$VM_RAM"
             -object "secret,id=vncpw,file=$SECRET_FILE"
             -vnc "127.0.0.1:0,password-secret=vncpw"
-            -device "virtio-vga"
-            -device "virtio-keyboard"
-            -device "virtio-mouse"
+            -device virtio-vga
+            -device virtio-keyboard
+            -device virtio-mouse
             -drive "file=$VM_DISK,if=virtio,format=qcow2"
             -boot "order=$BOOT_ORDER"
-            -netdev "user,id=net0"
-            -device "virtio-net-pci,netdev=net0"
-            -rtc "base=utc"
+            -netdev user,id=net0
+            -device virtio-net-pci,netdev=net0
+            -rtc base=utc
             -no-reboot
           )
 
           if [[ "$ACCEL" == "kvm" ]]; then
             QEMU_ARGS+=(-enable-kvm)
           else
-            QEMU_ARGS+=(-accel "tcg,thread=multi")
+            QEMU_ARGS+=(-accel tcg,thread=multi)
           fi
 
           if [[ "$BOOT_ORDER" == "dc" ]]; then
             QEMU_ARGS+=(
-              -drive "file=$ZORIN_DIR/zorin.iso,media=cdrom,readonly=on"
+              -drive "file=$LINGMO_DIR/lingmo.iso,media=cdrom,readonly=on"
             )
           fi
 
-          echo "Iniciando QEMU..."
-
           nohup "$QEMU_BIN" "${QEMU_ARGS[@]}" \
-            > "$ZORIN_DIR/qemu.log" 2>&1 &
+            > "$LINGMO_DIR/qemu.log" 2>&1 &
 
           QEMU_PID=$!
-          echo "$QEMU_PID" > "$ZORIN_DIR/qemu.pid"
+          echo "$QEMU_PID" > "$LINGMO_DIR/qemu.pid"
 
           sleep 5
 
           if ! kill -0 "$QEMU_PID" 2>/dev/null; then
             echo "ERRO: QEMU encerrou inesperadamente."
-            cat "$ZORIN_DIR/qemu.log"
+            cat "$LINGMO_DIR/qemu.log"
             exit 1
           fi
 
           echo "VM_STARTED=true" >> "$GITHUB_ENV"
 
-          echo "PC virtual iniciado."
+          echo "Lingmo OS iniciado."
 
       # ==========================================
       # 7. INICIAR NOVNC
       # ==========================================
 
-      - name: Iniciar acesso noVNC
+      - name: Iniciar noVNC
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -340,22 +298,22 @@ jobs:
             --web=/usr/share/novnc \
             6080 \
             127.0.0.1:5900 \
-            > "$ZORIN_DIR/novnc.log" 2>&1 &
+            > "$LINGMO_DIR/novnc.log" 2>&1 &
 
-          echo $! > "$ZORIN_DIR/novnc.pid"
+          echo $! > "$LINGMO_DIR/novnc.pid"
 
           sleep 3
 
           if ! curl -fsS http://127.0.0.1:6080/ >/dev/null; then
             echo "ERRO: noVNC nao iniciou."
-            cat "$ZORIN_DIR/novnc.log"
+            cat "$LINGMO_DIR/novnc.log"
             exit 1
           fi
 
-          echo "noVNC iniciado na porta 6080."
+          echo "noVNC funcionando."
 
       # ==========================================
-      # 8. CRIAR TUNEL CLOUDFLARE
+      # 8. INSTALAR CLOUDFLARE TUNNEL
       # ==========================================
 
       - name: Instalar Cloudflare Tunnel
@@ -367,10 +325,10 @@ jobs:
 
           case "$ARCH" in
             amd64)
-              CF_ARCH="amd64"
+              CF_ARCH=amd64
               ;;
             arm64)
-              CF_ARCH="arm64"
+              CF_ARCH=arm64
               ;;
             *)
               echo "Arquitetura nao suportada: $ARCH"
@@ -387,7 +345,11 @@ jobs:
 
           "$RUNNER_TEMP/cloudflared" --version
 
-      - name: Abrir acesso remoto
+      # ==========================================
+      # 9. ABRIR ACESSO REMOTO
+      # ==========================================
+
+      - name: Criar tunel remoto
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -395,18 +357,18 @@ jobs:
           nohup "$RUNNER_TEMP/cloudflared" tunnel \
             --url http://127.0.0.1:6080 \
             --no-autoupdate \
-            > "$ZORIN_DIR/cloudflared.log" 2>&1 &
+            > "$LINGMO_DIR/cloudflared.log" 2>&1 &
 
-          echo $! > "$ZORIN_DIR/cloudflared.pid"
-
-          echo "Aguardando endereco publico..."
+          echo $! > "$LINGMO_DIR/cloudflared.pid"
 
           PUBLIC_URL=""
+
+          echo "Aguardando endereco publico..."
 
           for i in $(seq 1 60); do
             PUBLIC_URL="$(
               grep -Eo 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' \
-                "$ZORIN_DIR/cloudflared.log" \
+                "$LINGMO_DIR/cloudflared.log" \
                 | head -n 1 || true
             )"
 
@@ -418,8 +380,8 @@ jobs:
           done
 
           if [[ -z "$PUBLIC_URL" ]]; then
-            echo "ERRO: nao foi possivel obter o endereco Cloudflare."
-            cat "$ZORIN_DIR/cloudflared.log"
+            echo "ERRO: o tunel Cloudflare nao iniciou."
+            cat "$LINGMO_DIR/cloudflared.log"
             exit 1
           fi
 
@@ -432,29 +394,25 @@ jobs:
           echo "Perfil do Discord: Brasil_kill0"
           echo "Data de criacao: 9 de outubro de 2026"
           echo ""
-          echo "|| DETALHES DO PC VIRTUAL [BETA] ||"
-          echo "Sistema: Zorin OS ($EDITION)"
+          echo "|| DETALHES DO PC VIRTUAL ||"
+          echo "Sistema: Lingmo OS 3.0.5"
           echo "CPU virtual: $VM_CPU vCPU"
           echo "RAM virtual: ${VM_RAM} MB"
           echo "Disco virtual: 145 GB"
           echo "Aceleracao: $ACCEL"
           echo "Interface: noVNC"
-          echo "Rede remota: Cloudflare Tunnel"
+          echo "Rede: Cloudflare Tunnel"
           echo ""
           echo "|| ACESSO AO PC ||"
-          echo "Endereco: $PUBLIC_URL/vnc.html?autoconnect=true&resize=scale"
-          echo "Senha VNC: definida por voce na execucao do workflow"
+          echo "$PUBLIC_URL/vnc.html?autoconnect=true&resize=scale"
           echo ""
-          echo "Abra o endereco no navegador do celular."
-          echo "Nao compartilhe o endereco nem a senha."
+          echo "Senha VNC: a senha definida ao iniciar o workflow."
           echo ""
-          echo "O PC ficara ativo enquanto esta execucao estiver rodando."
+          echo "Nao compartilhe o endereco publico."
           echo "=========================================="
 
-          echo "PUBLIC_URL=$PUBLIC_URL" >> "$GITHUB_ENV"
-
       # ==========================================
-      # 9. MANTER O PC LIGADO
+      # 10. MANTER O PC LIGADO
       # ==========================================
 
       - name: Manter PC virtual ativo
@@ -463,16 +421,14 @@ jobs:
           set -Eeuo pipefail
 
           echo "PC virtual em funcionamento."
-          echo "O workflow tem um limite maximo de 6 horas."
 
-          # Deixa tempo para iniciar, desligar e salvar o disco.
           for i in $(seq 1 20700); do
-            if [[ -f "$ZORIN_DIR/qemu.pid" ]]; then
-              QEMU_PID="$(cat "$ZORIN_DIR/qemu.pid")"
+            if [[ -f "$LINGMO_DIR/qemu.pid" ]]; then
+              QEMU_PID="$(cat "$LINGMO_DIR/qemu.pid")"
 
               if ! kill -0 "$QEMU_PID" 2>/dev/null; then
                 echo "QEMU encerrou."
-                cat "$ZORIN_DIR/qemu.log" || true
+                cat "$LINGMO_DIR/qemu.log" || true
                 break
               fi
             fi
@@ -480,13 +436,13 @@ jobs:
             sleep 1
           done
 
-          echo "Sessao finalizada ou limite de tempo atingido."
+          echo "Sessao finalizada."
 
       # ==========================================
-      # 10. PARAR PROCESSOS E SALVAR DISCO
+      # 11. PREPARAR BACKUP
       # ==========================================
 
-      - name: Preparar backup do disco
+      - name: Preparar backup
         if: always()
         shell: bash
         run: |
@@ -494,18 +450,17 @@ jobs:
 
           mkdir -p "$SAVE_DIR"
 
-          if [[ -f "$ZORIN_DIR/qemu.pid" ]]; then
-            QEMU_PID="$(cat "$ZORIN_DIR/qemu.pid")"
+          if [[ -f "$LINGMO_DIR/qemu.pid" ]]; then
+            QEMU_PID="$(cat "$LINGMO_DIR/qemu.pid")"
 
             if kill -0 "$QEMU_PID" 2>/dev/null; then
-              echo "Encerrando QEMU para salvar o disco."
-
               kill -TERM "$QEMU_PID" 2>/dev/null || true
 
               for i in $(seq 1 30); do
                 if ! kill -0 "$QEMU_PID" 2>/dev/null; then
                   break
                 fi
+
                 sleep 1
               done
 
@@ -515,52 +470,52 @@ jobs:
             fi
           fi
 
-          if [[ -f "$ZORIN_DIR/cloudflared.pid" ]]; then
-            kill "$(cat "$ZORIN_DIR/cloudflared.pid")" 2>/dev/null || true
-          fi
+          for PID_FILE in \
+            "$LINGMO_DIR/cloudflared.pid" \
+            "$LINGMO_DIR/novnc.pid"; do
 
-          if [[ -f "$ZORIN_DIR/novnc.pid" ]]; then
-            kill "$(cat "$ZORIN_DIR/novnc.pid")" 2>/dev/null || true
-          fi
+            if [[ -f "$PID_FILE" ]]; then
+              kill "$(cat "$PID_FILE")" 2>/dev/null || true
+            fi
+          done
 
           if [[ -f "$VM_DISK" ]]; then
-            echo "Compactando disco virtual..."
-
-            rm -f "$SAVE_DIR/zorin.qcow2.zst"
+            echo "Compactando disco..."
 
             if zstd -T0 -3 -f \
               "$VM_DISK" \
-              -o "$SAVE_DIR/zorin.qcow2.zst"; then
+              -o "$SAVE_DIR/lingmo.qcow2.zst"; then
 
               echo "SAVE_READY=true" >> "$GITHUB_ENV"
-              echo "Backup compactado preparado."
-              ls -lh "$SAVE_DIR/zorin.qcow2.zst"
+
+              echo "Backup preparado."
+              ls -lh "$SAVE_DIR/lingmo.qcow2.zst"
             else
-              echo "ERRO: nao foi possivel compactar o disco."
               echo "SAVE_READY=false" >> "$GITHUB_ENV"
+              echo "ERRO: falha ao compactar disco."
               exit 1
             fi
           else
-            echo "Disco nao encontrado; backup nao sera salvo."
             echo "SAVE_READY=false" >> "$GITHUB_ENV"
+            echo "Disco nao encontrado."
           fi
 
       # ==========================================
-      # 11. SALVAR NO CACHE DO GITHUB
+      # 12. SALVAR CACHE
       # ==========================================
 
       - name: Salvar disco no cache
         if: always() && env.SAVE_READY == 'true'
         uses: actions/cache/save@v4
         with:
-          path: /home/runner/zorin-save
-          key: extnobrasil-zorin-${{ github.ref_name }}-${{ github.run_id }}
+          path: /home/runner/lingmo-save
+          key: extnobrasil-lingmo-${{ github.ref_name }}-${{ github.run_id }}
 
       # ==========================================
-      # 12. MOSTRAR LOG SE OCORRER ERRO
+      # 13. DIAGNOSTICO
       # ==========================================
 
-      - name: Mostrar logs de diagnostico
+      - name: Mostrar logs em caso de erro
         if: failure()
         shell: bash
         run: |
@@ -568,23 +523,14 @@ jobs:
           echo "       DIAGNOSTICO EXT NOBRASIL"
           echo "=========================================="
 
-          if [[ -f "$ZORIN_DIR/qemu.log" ]]; then
-            echo ""
-            echo "---- LOG DO QEMU ----"
-            tail -n 100 "$ZORIN_DIR/qemu.log" || true
-          fi
+          for LOG_FILE in \
+            "$LINGMO_DIR/qemu.log" \
+            "$LINGMO_DIR/novnc.log" \
+            "$LINGMO_DIR/cloudflared.log"; do
 
-          if [[ -f "$ZORIN_DIR/novnc.log" ]]; then
-            echo ""
-            echo "---- LOG DO NOVNC ----"
-            tail -n 50 "$ZORIN_DIR/novnc.log" || true
-          fi
-
-          if [[ -f "$ZORIN_DIR/cloudflared.log" ]]; then
-            echo ""
-            echo "---- LOG DO CLOUDFLARE ----"
-            tail -n 50 "$ZORIN_DIR/cloudflared.log" || true
-          fi
-
-          echo ""
-          echo "Verifique tambem o erro exibido nas etapas anteriores."
+            if [[ -f "$LOG_FILE" ]]; then
+              echo ""
+              echo "---- $LOG_FILE ----"
+              tail -n 80 "$LOG_FILE" || true
+            fi
+          done
