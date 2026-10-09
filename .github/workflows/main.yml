@@ -1,13 +1,12 @@
-name: "🎮 ExtNoBrasil PC - Zorin OS [BETA]"
+name: ExtNoBrasil PC Gamer [BETA]
 
 on:
   workflow_dispatch:
     inputs:
       vnc_password:
-        description: "Senha VNC: 6 a 8 letras ou números"
+        description: "Senha VNC de 6 a 8 caracteres alfanuméricos"
         required: true
         type: string
-        default: "ExT2026"
 
       edition:
         description: "Edicao do Zorin OS"
@@ -16,628 +15,576 @@ on:
         options:
           - core
           - lite
-        default: core
-
-      fresh_install:
-        description: "Comecar do zero, ignorando o save anterior?"
-        required: true
-        type: boolean
-        default: false
+        default: lite
 
 permissions:
   contents: read
-  actions: write
 
 concurrency:
-  group: extnobrasil-zorin-pc
+  group: extnobrasil-pc-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  zorin:
-    name: "🚀 Iniciar PC Virtual"
-    runs-on: ubuntu-24.04
+  pc-virtual:
+    name: ExtNoBrasil PC Gamer
+    runs-on: ubuntu-latest
     timeout-minutes: 360
 
     env:
-      DISK: 145G
+      VM_NAME: "ExtNoBrasil PC Gamer [BETA]"
+      VM_DISK: "/home/runner/zorin/zorin.qcow2"
+      VM_DISK_SIZE: "145G"
+      SAVE_DIR: "/home/runner/zorin-save"
+      ZORIN_DIR: "/home/runner/zorin"
+      VNC_PASSWORD: ${{ inputs.vnc_password }}
       EDITION: ${{ inputs.edition }}
-      VNC_PASS: ${{ inputs.vnc_password }}
-      MAX_SECONDS: 19500
-      GH_TOKEN: ${{ github.token }}
 
     steps:
+      # ==========================================
+      # 1. PREPARAR O AMBIENTE
+      # ==========================================
 
-      # 1. Preparar o ambiente
-      - name: "📦 Instalar dependências"
+      - name: Preparar ambiente
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          if [[ ! "$VNC_PASS" =~ ^[a-zA-Z0-9]{6,8}$ ]]; then
-            echo "❌ A senha deve conter de 6 a 8 letras ou números."
+          echo "=========================================="
+          echo "   EXT NOBRASIL PC GAMER [BETA]"
+          echo "=========================================="
+
+          if [[ ! "$VNC_PASSWORD" =~ ^[A-Za-z0-9]{6,8}$ ]]; then
+            echo "ERRO: a senha precisa ter de 6 a 8 letras ou numeros."
             exit 1
           fi
 
-          echo "::add-mask::$VNC_PASS"
-          echo "START_TS=$(date +%s)" >> "$GITHUB_ENV"
+          if [[ "$EDITION" != "core" && "$EDITION" != "lite" ]]; then
+            echo "ERRO: edicao invalida."
+            exit 1
+          fi
 
-          sudo apt-get update -qq
+          sudo apt-get update
 
-          sudo apt-get install -y \
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             qemu-system-x86 \
             qemu-utils \
             novnc \
             websockify \
-            aria2 \
+            zstd \
             curl \
             wget \
             ca-certificates \
-            zstd \
-            socat \
-            openssh-client
+            procps \
+            lsof \
+            jq
 
-          wget -q \
-            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
-            -O "$HOME/cloudflared"
+          mkdir -p "$ZORIN_DIR"
+          mkdir -p "$SAVE_DIR"
 
-          chmod +x "$HOME/cloudflared"
+          echo "Preparacao concluida."
 
-          echo "✅ Dependências instaladas."
+      # ==========================================
+      # 2. DETECTAR RECURSOS
+      # ==========================================
 
-      # 2. Restaurar o disco salvo
-      - name: "💾 Restaurar disco anterior"
-        id: restore
-        if: ${{ !inputs.fresh_install }}
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/zorin-save
-          key: zorin-disk-nomatch-${{ github.run_id }}
-          restore-keys: |
-            zorin-disk-
-
-      # 3. Preparar ISO, KVM e disco
-      - name: "⚙️ Preparar sistema e armazenamento"
+      - name: Detectar CPU, RAM e KVM
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          mkdir -p "$HOME/zorin" "$HOME/zorin-save"
+          CPU_HOST="$(nproc)"
+          RAM_HOST="$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo)"
 
-          echo "=============================================="
-          echo "     EXTNOBRASIL PC - PREPARACAO"
-          echo "=============================================="
-
-          # Liberar espaço não utilizado no runner.
-          (
-            sudo rm -rf \
-              /usr/share/dotnet \
-              /opt/ghc \
-              /usr/local/lib/android \
-              /opt/hostedtoolcache/CodeQL \
-              /usr/local/share/boost \
-              >/dev/null 2>&1 || true
-          ) &
-          CLEAN_PID=$!
-
-          # Detectar KVM.
-          if [[ -c /dev/kvm && -r /dev/kvm && -w /dev/kvm ]]; then
-            echo "ACCEL=kvm" >> "$GITHUB_ENV"
-            echo "CPU_OPT=host" >> "$GITHUB_ENV"
-            echo "✅ KVM disponível."
+          if [[ "$CPU_HOST" -lt 2 ]]; then
+            VM_CPU=1
+          elif [[ "$CPU_HOST" -gt 4 ]]; then
+            VM_CPU=4
           else
-            echo "ACCEL=tcg,thread=multi" >> "$GITHUB_ENV"
-            echo "CPU_OPT=max" >> "$GITHUB_ENV"
-            echo "⚠️ KVM indisponível; usando emulação por software."
+            VM_CPU="$CPU_HOST"
           fi
 
-          # Selecionar os links da ISO.
-          # A disponibilidade dos arquivos depende do servidor de download.
-          case "$EDITION" in
-            lite)
-              URLS="
-              https://distro.ibiblio.org/zorinos/18/Zorin-OS-18.1-Lite-64-bit.iso
-              https://distro.ibiblio.org/zorinos/18/Zorin-OS-18-Lite-64-bit.iso
-              "
-              ;;
-            core)
-              URLS="
-              https://distro.ibiblio.org/zorinos/18/Zorin-OS-18.1-Core-64-bit.iso
-              https://distro.ibiblio.org/zorinos/18/Zorin-OS-18-Core-64-bit.iso
-              "
-              ;;
-            *)
-              echo "❌ Edição inválida."
-              exit 1
-              ;;
-          esac
+          # Reserva memoria para o sistema hospedeiro.
+          VM_RAM=$((RAM_HOST - 2048))
 
-          ISO_OK=false
-
-          for URL in $URLS; do
-            echo "Tentando baixar a ISO:"
-            echo "$URL"
-
-            rm -f "$HOME/zorin/zorin.iso"
-
-            aria2c \
-              --max-connection-per-server=4 \
-              --split=4 \
-              --min-split-size=1M \
-              --console-log-level=warn \
-              --connect-timeout=20 \
-              --max-tries=2 \
-              --retry-wait=3 \
-              --dir="$HOME/zorin" \
-              --out=zorin.iso \
-              "$URL" || true
-
-            SIZE=$(stat -c%s "$HOME/zorin/zorin.iso" 2>/dev/null || echo 0)
-
-            if [[ "$SIZE" -gt 1000000000 ]] &&
-               file "$HOME/zorin/zorin.iso" | grep -qiE 'ISO|boot|data'; then
-              ISO_OK=true
-              break
-            fi
-
-            echo "⚠️ ISO indisponível ou inválida. Tentando o próximo endereço."
-          done
-
-          if [[ "$ISO_OK" != true ]]; then
-            echo "❌ Não foi possível baixar uma ISO válida."
-            echo "Verifique os links de download da edição escolhida."
-            exit 1
+          if [[ "$VM_RAM" -gt 6144 ]]; then
+            VM_RAM=6144
           fi
 
-          wait "$CLEAN_PID" || true
-
-          echo "✅ ISO preparada."
-          du -h "$HOME/zorin/zorin.iso"
-          df -h /
-
-          # Criar swap adicional, se o runner permitir.
-          if [[ ! -e /swapfile-extra ]]; then
-            sudo fallocate -l 4G /swapfile-extra 2>/dev/null || true
-            if [[ -f /swapfile-extra ]]; then
-              sudo chmod 600 /swapfile-extra
-              sudo mkswap /swapfile-extra >/dev/null 2>&1 || true
-              sudo swapon /swapfile-extra 2>/dev/null || true
-            fi
+          if [[ "$VM_RAM" -gt 4096 ]]; then
+            VM_RAM=4096
           fi
 
-          sudo sysctl -qw vm.swappiness=10 2>/dev/null || true
-
-          # Restaurar disco se houver um save válido.
-          ZST="$HOME/zorin-save/zorin.qcow2.zst"
-          SIZE_FILE="$HOME/zorin-save/zorin.size"
-          RESTORE_OK=false
-
-          if [[ -f "$ZST" && -f "$SIZE_FILE" ]]; then
-            NEED=$(cat "$SIZE_FILE")
-            AVAIL=$(df --output=avail -B1 / | tail -1)
-
-            if [[ "$NEED" =~ ^[0-9]+$ ]] &&
-               (( NEED < AVAIL - 3000000000 )); then
-              RESTORE_OK=true
-            else
-              echo "⚠️ Save maior que o espaço disponível; será ignorado."
-            fi
+          if [[ "$VM_RAM" -lt 1024 ]]; then
+            VM_RAM=1024
           fi
 
-          if [[ "$RESTORE_OK" == true ]]; then
-            echo "💾 Restaurando disco salvo..."
+          if [[ -r /dev/kvm ]] && [[ -w /dev/kvm ]]; then
+            ACCEL="kvm"
+            echo "Aceleracao KVM disponivel."
+          else
+            ACCEL="tcg"
+            echo "KVM indisponivel: usando TCG."
+          fi
 
-            zstd -d --rm -f \
-              "$ZST" \
-              -o "$HOME/zorin/zorin.qcow2"
+          echo "VM_CPU=$VM_CPU" >> "$GITHUB_ENV"
+          echo "VM_RAM=$VM_RAM" >> "$GITHUB_ENV"
+          echo "ACCEL=$ACCEL" >> "$GITHUB_ENV"
+
+          echo "CPU da VM: $VM_CPU"
+          echo "RAM da VM: ${VM_RAM} MB"
+          echo "Aceleracao: $ACCEL"
+
+      # ==========================================
+      # 3. RESTAURAR DISCO ANTERIOR
+      # ==========================================
+
+      - name: Restaurar disco salvo
+        id: restore
+        uses: actions/cache/restore@v4
+        with:
+          path: /home/runner/zorin-save
+          key: extnobrasil-zorin-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            extnobrasil-zorin-${{ github.ref_name }}-
+            extnobrasil-zorin-
+
+      - name: Preparar disco virtual
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          mkdir -p "$ZORIN_DIR"
+          mkdir -p "$SAVE_DIR"
+
+          RESTORED="false"
+
+          if [[ -f "$SAVE_DIR/zorin.qcow2.zst" ]]; then
+            echo "Backup compactado encontrado."
+
+            zstd -d -f \
+              "$SAVE_DIR/zorin.qcow2.zst" \
+              -o "$VM_DISK"
+
+            RESTORED="true"
+
+          elif [[ -f "$SAVE_DIR/zorin.qcow2" ]]; then
+            echo "Backup de disco encontrado."
+
+            cp "$SAVE_DIR/zorin.qcow2" "$VM_DISK"
+            RESTORED="true"
+          fi
+
+          if [[ "$RESTORED" == "true" ]]; then
+            echo "Disco anterior restaurado."
+
+            qemu-img info "$VM_DISK"
 
             echo "RESTORED=true" >> "$GITHUB_ENV"
-
-            echo "✅ Disco restaurado."
           else
-            rm -f "$HOME/zorin-save/zorin.qcow2.zst"
-            rm -f "$HOME/zorin-save/zorin.size"
-
-            echo "💿 Criando disco virtual novo..."
+            echo "Nenhum disco anterior encontrado."
+            echo "Criando disco virtual de 145 GB."
 
             qemu-img create \
               -f qcow2 \
-              -o lazy_refcounts=on,cluster_size=1M \
-              "$HOME/zorin/zorin.qcow2" \
-              "$DISK"
+              "$VM_DISK" \
+              "$VM_DISK_SIZE"
 
             echo "RESTORED=false" >> "$GITHUB_ENV"
           fi
 
-          ls -lh "$HOME/zorin/zorin.qcow2"
+      # ==========================================
+      # 4. BAIXAR O ZORIN OS
+      # ==========================================
 
-      # 4. Definir recursos e criar o inicializador
-      - name: "🚀 Otimizar e criar inicializador QEMU"
+      - name: Baixar ISO do Zorin OS
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          AVAIL_MB=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
+          case "$EDITION" in
+            core)
+              ISO_URL="https://distro.ibiblio.org/zorinos/18/Zorin-OS-18.1-Core-64-bit.iso"
+              ;;
+            lite)
+              ISO_URL="https://distro.ibiblio.org/zorinos/18/Zorin-OS-18.1-Lite-64-bit.iso"
+              ;;
+          esac
 
-          # Reservar memória para o sistema hospedeiro.
-          VM_RAM_MB=$((AVAIL_MB - 2048))
+          ISO_FILE="$ZORIN_DIR/zorin.iso"
 
-          if (( VM_RAM_MB > 6144 )); then
-            VM_RAM_MB=6144
-          fi
+          echo "Edicao selecionada: $EDITION"
+          echo "Verificando disponibilidade da ISO..."
 
-          if (( VM_RAM_MB < 2048 )); then
-            VM_RAM_MB=2048
-          fi
-
-          VM_CPUS=$(nproc)
-
-          if (( VM_CPUS > 4 )); then
-            VM_CPUS=4
-          fi
-
-          if (( VM_CPUS < 2 )); then
-            VM_CPUS=2
-          fi
-
-          echo "VM_RAM_MB=$VM_RAM_MB" >> "$GITHUB_ENV"
-          echo "VM_CPUS=$VM_CPUS" >> "$GITHUB_ENV"
-
-          echo "RAM detectada: ${AVAIL_MB} MB"
-          echo "RAM da VM: ${VM_RAM_MB} MB"
-          echo "CPUs virtuais: ${VM_CPUS}"
-
-          # Restaurado: iniciar do disco.
-          # Novo: iniciar pela ISO para instalar o sistema.
-          if [[ "$RESTORED" == "true" ]]; then
-            BOOT_ORDER="c"
-          else
-            BOOT_ORDER="dc"
-          fi
-
-          cat > "$HOME/zorin/start-zorin.sh" <<EOF
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-
-          exec qemu-system-x86_64 \\
-            -name "ExtNoBrasil-PC-Gamer" \\
-            -machine q35 \\
-            -accel "${ACCEL}" \\
-            -cpu "${CPU_OPT}" \\
-            -smp "${VM_CPUS}" \\
-            -m "${VM_RAM_MB}M" \\
-            -drive file="$HOME/zorin/zorin.qcow2",if=none,id=hd0,format=qcow2,cache=writeback,aio=threads,discard=unmap \\
-            -device virtio-blk-pci,drive=hd0 \\
-            -drive file="$HOME/zorin/zorin.iso",media=cdrom,readonly=on \\
-            -boot order="${BOOT_ORDER}",menu=on \\
-            -vga std \\
-            -device qemu-xhci \\
-            -device usb-tablet \\
-            -object secret,id=vncpw,data="\${VNC_PASS}" \\
-            -vnc 127.0.0.1:0,password=on,password-secret=vncpw \\
-            -monitor unix:"$HOME/zorin/monitor.sock",server=on,wait=off \\
-            -netdev user,id=net0 \\
-            -device virtio-net-pci,netdev=net0 \\
-            -device virtio-balloon-pci \\
-            -rtc base=localtime
-          EOF
-
-          chmod +x "$HOME/zorin/start-zorin.sh"
-
-          echo "✅ Inicializador criado."
-
-      # 5. Iniciar a máquina virtual
-      - name: "🖥️ Iniciar Zorin OS"
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          nohup "$HOME/zorin/start-zorin.sh" \
-            > "$HOME/zorin/qemu.log" 2>&1 &
-
-          QEMU_PID=$!
-          echo "$QEMU_PID" > "$HOME/zorin/qemu.pid"
-          echo "VM_STARTED=true" >> "$GITHUB_ENV"
-
-          for i in $(seq 1 30); do
-            if ! kill -0 "$QEMU_PID" 2>/dev/null; then
-              echo "❌ QEMU encerrou inesperadamente."
-              cat "$HOME/zorin/qemu.log"
-              exit 1
-            fi
-
-            if ss -ltn | grep -q '127.0.0.1:5900'; then
-              break
-            fi
-
-            sleep 2
-          done
-
-          if ! ss -ltn | grep -q '127.0.0.1:5900'; then
-            echo "❌ O VNC não iniciou."
-            cat "$HOME/zorin/qemu.log"
+          if ! curl -fIL --retry 2 --connect-timeout 20 "$ISO_URL"; then
+            echo ""
+            echo "ERRO: o endereco da ISO nao esta disponivel."
+            echo "O link pode ter mudado ou a edicao pode nao existir nesse endereco."
+            echo "Consulte a pagina oficial de downloads do Zorin OS."
             exit 1
           fi
 
-          echo "✅ Máquina virtual iniciada."
+          echo "Baixando ISO..."
 
-      # 6. Iniciar noVNC e Cloudflare
-      - name: "🌐 Iniciar noVNC e túnel HTTPS"
+          curl -fL \
+            --retry 3 \
+            --connect-timeout 30 \
+            --output "$ISO_FILE" \
+            "$ISO_URL"
+
+          if [[ ! -s "$ISO_FILE" ]]; then
+            echo "ERRO: arquivo ISO vazio."
+            exit 1
+          fi
+
+          echo "ISO baixada."
+
+      # ==========================================
+      # 5. PREPARAR SENHA VNC
+      # ==========================================
+
+      - name: Preparar autenticacao VNC
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          # A senha nao sera impressa nos logs.
+          printf '%s' "$VNC_PASSWORD" > "$RUNNER_TEMP/vnc-password"
+          chmod 600 "$RUNNER_TEMP/vnc-password"
+
+          # O QEMU utiliza um objeto secret.
+          # IMPORTANTE: nao usar password=on junto com password-secret.
+          echo "Autenticacao VNC preparada."
+
+      # ==========================================
+      # 6. INICIAR QEMU
+      # ==========================================
+
+      - name: Iniciar PC virtual
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          SECRET_FILE="$RUNNER_TEMP/vnc-password"
+
+          if [[ "${RESTORED:-false}" == "true" ]]; then
+            echo "Inicializando pelo disco restaurado."
+            BOOT_ORDER="c"
+          else
+            echo "Inicializando pela ISO para instalar o sistema."
+            BOOT_ORDER="dc"
+          fi
+
+          QEMU_BIN="$(command -v qemu-system-x86_64)"
+
+          QEMU_ARGS=(
+            -name "$VM_NAME"
+            -machine "q35"
+            -cpu "max"
+            -smp "$VM_CPU"
+            -m "$VM_RAM"
+            -object "secret,id=vncpw,file=$SECRET_FILE"
+            -vnc "127.0.0.1:0,password-secret=vncpw"
+            -device "virtio-vga"
+            -device "virtio-keyboard"
+            -device "virtio-mouse"
+            -drive "file=$VM_DISK,if=virtio,format=qcow2"
+            -boot "order=$BOOT_ORDER"
+            -netdev "user,id=net0"
+            -device "virtio-net-pci,netdev=net0"
+            -rtc "base=utc"
+            -no-reboot
+          )
+
+          if [[ "$ACCEL" == "kvm" ]]; then
+            QEMU_ARGS+=(-enable-kvm)
+          else
+            QEMU_ARGS+=(-accel "tcg,thread=multi")
+          fi
+
+          if [[ "$BOOT_ORDER" == "dc" ]]; then
+            QEMU_ARGS+=(
+              -drive "file=$ZORIN_DIR/zorin.iso,media=cdrom,readonly=on"
+            )
+          fi
+
+          echo "Iniciando QEMU..."
+
+          nohup "$QEMU_BIN" "${QEMU_ARGS[@]}" \
+            > "$ZORIN_DIR/qemu.log" 2>&1 &
+
+          QEMU_PID=$!
+          echo "$QEMU_PID" > "$ZORIN_DIR/qemu.pid"
+
+          sleep 5
+
+          if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+            echo "ERRO: QEMU encerrou inesperadamente."
+            cat "$ZORIN_DIR/qemu.log"
+            exit 1
+          fi
+
+          echo "VM_STARTED=true" >> "$GITHUB_ENV"
+
+          echo "PC virtual iniciado."
+
+      # ==========================================
+      # 7. INICIAR NOVNC
+      # ==========================================
+
+      - name: Iniciar acesso noVNC
         shell: bash
         run: |
           set -Eeuo pipefail
 
           nohup websockify \
-            --web=/usr/share/novnc/ \
-            127.0.0.1:6080 \
+            --web=/usr/share/novnc \
+            6080 \
             127.0.0.1:5900 \
-            > "$HOME/zorin/novnc.log" 2>&1 &
+            > "$ZORIN_DIR/novnc.log" 2>&1 &
 
-          echo $! > "$HOME/zorin/novnc.pid"
+          echo $! > "$ZORIN_DIR/novnc.pid"
 
           sleep 3
 
-          if ! kill -0 "$(cat "$HOME/zorin/novnc.pid")" 2>/dev/null; then
-            echo "❌ noVNC não iniciou."
-            cat "$HOME/zorin/novnc.log"
+          if ! curl -fsS http://127.0.0.1:6080/ >/dev/null; then
+            echo "ERRO: noVNC nao iniciou."
+            cat "$ZORIN_DIR/novnc.log"
             exit 1
           fi
 
-          nohup "$HOME/cloudflared" tunnel \
+          echo "noVNC iniciado na porta 6080."
+
+      # ==========================================
+      # 8. CRIAR TUNEL CLOUDFLARE
+      # ==========================================
+
+      - name: Instalar Cloudflare Tunnel
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          ARCH="$(dpkg --print-architecture)"
+
+          case "$ARCH" in
+            amd64)
+              CF_ARCH="amd64"
+              ;;
+            arm64)
+              CF_ARCH="arm64"
+              ;;
+            *)
+              echo "Arquitetura nao suportada: $ARCH"
+              exit 1
+              ;;
+          esac
+
+          curl -fL \
+            --retry 3 \
+            "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}" \
+            -o "$RUNNER_TEMP/cloudflared"
+
+          chmod +x "$RUNNER_TEMP/cloudflared"
+
+          "$RUNNER_TEMP/cloudflared" --version
+
+      - name: Abrir acesso remoto
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          nohup "$RUNNER_TEMP/cloudflared" tunnel \
             --url http://127.0.0.1:6080 \
             --no-autoupdate \
-            > "$HOME/zorin/cloudflare.log" 2>&1 &
+            > "$ZORIN_DIR/cloudflared.log" 2>&1 &
 
-          echo $! > "$HOME/zorin/cloudflared.pid"
+          echo $! > "$ZORIN_DIR/cloudflared.pid"
 
-          URL=""
+          echo "Aguardando endereco publico..."
+
+          PUBLIC_URL=""
 
           for i in $(seq 1 60); do
-            sleep 2
+            PUBLIC_URL="$(
+              grep -Eo 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' \
+                "$ZORIN_DIR/cloudflared.log" \
+                | head -n 1 || true
+            )"
 
-            URL=$(grep -oE \
-              'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
-              "$HOME/zorin/cloudflare.log" \
-              | tail -n 1 || true)
-
-            if [[ -n "$URL" ]]; then
+            if [[ -n "$PUBLIC_URL" ]]; then
               break
             fi
 
-            if ! kill -0 "$(cat "$HOME/zorin/cloudflared.pid")" 2>/dev/null; then
-              echo "❌ Cloudflare Tunnel encerrou."
-              cat "$HOME/zorin/cloudflare.log"
-              exit 1
-            fi
+            sleep 2
           done
 
-          if [[ -z "$URL" ]]; then
-            echo "❌ Não foi possível gerar o link HTTPS."
-            cat "$HOME/zorin/cloudflare.log"
+          if [[ -z "$PUBLIC_URL" ]]; then
+            echo "ERRO: nao foi possivel obter o endereco Cloudflare."
+            cat "$ZORIN_DIR/cloudflared.log"
             exit 1
           fi
 
-          echo "NOVNC_URL=$URL" >> "$GITHUB_ENV"
+          echo "=========================================="
+          echo "       EXT NOBRASIL PC GAMER [BETA]"
+          echo "=========================================="
+          echo ""
+          echo "|| CREDITOS ||"
+          echo "Criador: ExtNoBrasil (ExT)"
+          echo "Perfil do Discord: Brasil_kill0"
+          echo "Data de criacao: 9 de outubro de 2026"
+          echo ""
+          echo "|| DETALHES DO PC VIRTUAL [BETA] ||"
+          echo "Sistema: Zorin OS ($EDITION)"
+          echo "CPU virtual: $VM_CPU vCPU"
+          echo "RAM virtual: ${VM_RAM} MB"
+          echo "Disco virtual: 145 GB"
+          echo "Aceleracao: $ACCEL"
+          echo "Interface: noVNC"
+          echo "Rede remota: Cloudflare Tunnel"
+          echo ""
+          echo "|| ACESSO AO PC ||"
+          echo "Endereco: $PUBLIC_URL/vnc.html?autoconnect=true&resize=scale"
+          echo "Senha VNC: definida por voce na execucao do workflow"
+          echo ""
+          echo "Abra o endereco no navegador do celular."
+          echo "Nao compartilhe o endereco nem a senha."
+          echo ""
+          echo "O PC ficara ativo enquanto esta execucao estiver rodando."
+          echo "=========================================="
 
-          echo "✅ Túnel HTTPS iniciado."
+          echo "PUBLIC_URL=$PUBLIC_URL" >> "$GITHUB_ENV"
 
-      # 7. Créditos e informações do PC
-      - name: "🏆 Créditos e detalhes do PC Virtual"
+      # ==========================================
+      # 9. MANTER O PC LIGADO
+      # ==========================================
+
+      - name: Manter PC virtual ativo
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          clear || true
+          echo "PC virtual em funcionamento."
+          echo "O workflow tem um limite maximo de 6 horas."
 
-          echo ""
-          echo "╔══════════════════════════════════════════════╗"
-          echo "║          EXTNOBRASIL PC GAMER               ║"
-          echo "║                   BETA                       ║"
-          echo "╚══════════════════════════════════════════════╝"
-          echo ""
+          # Deixa tempo para iniciar, desligar e salvar o disco.
+          for i in $(seq 1 20700); do
+            if [[ -f "$ZORIN_DIR/qemu.pid" ]]; then
+              QEMU_PID="$(cat "$ZORIN_DIR/qemu.pid")"
 
-          echo "             || CRÉDITOS ||"
-          echo ""
-          echo "• Criador - ExtNoBrasil (ExT)"
-          echo "• Perfil do Discord - Brasil_kill0"
-          echo "• Dia De Criação - Sexta-feira 9 de outubro 2026"
-          echo ""
-
-          echo "=============================================="
-          echo "     || DETALHES DO PC VIRTUAL [BETA] ||"
-          echo "=============================================="
-          echo ""
-          echo "• Sistema: Zorin OS - ${EDITION}"
-          echo "• Virtualizador: QEMU"
-          echo "• CPUs virtuais: ${VM_CPUS}"
-          echo "• Memória RAM: ${VM_RAM_MB} MB"
-          echo "• Disco virtual: ${DISK}"
-          echo "• Formato do disco: QCOW2"
-          echo "• Vídeo: VGA virtual"
-          echo "• Aceleração: ${ACCEL}"
-          echo "• Rede: QEMU user-mode"
-          echo "• Acesso remoto: noVNC"
-          echo "• Conexão HTTPS: Cloudflare Tunnel"
-          echo "• Tailscale: desativado"
-          echo "• Disco restaurado: ${RESTORED}"
-          echo "• Tempo máximo aproximado: 325 minutos"
-          echo "• Estado: sessão temporária"
-          echo ""
-          echo "=============================================="
-          echo "             AVISOS IMPORTANTES"
-          echo "=============================================="
-          echo ""
-          echo "1. A ISO precisa estar disponível para download."
-          echo "2. Na primeira execução, instale o Zorin no disco."
-          echo "3. A restauração depende do cache do GitHub."
-          echo "4. O cache não é um sistema de backup permanente."
-          echo "5. O disco virtual de 145 GB cresce conforme usado."
-          echo "6. O vídeo virtual não garante aceleração 3D."
-          echo "7. O link HTTPS é temporário e pode mudar."
-          echo "8. Não compartilhe o link ou a senha VNC."
-          echo ""
-          echo "=============================================="
-          echo "                LINK DO NOVNC"
-          echo "=============================================="
-          echo ""
-          echo "${NOVNC_URL}/vnc.html?autoconnect=1&resize=scale"
-          echo ""
-          echo "Senha VNC: a senha informada no Run workflow."
-          echo ""
-          echo "⚠️ Guarde o link enquanto esta execução estiver ativa."
-          echo ""
-
-      # 8. Manter o PC virtual ativo
-      - name: "⏳ Manter PC Virtual online"
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          COUNT=0
-
-          while true; do
-            NOW=$(date +%s)
-            ELAPSED=$((NOW - START_TS))
-
-            if (( ELAPSED >= MAX_SECONDS )); then
-              echo "⏰ Tempo máximo atingido."
-              break
+              if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+                echo "QEMU encerrou."
+                cat "$ZORIN_DIR/qemu.log" || true
+                break
+              fi
             fi
 
-            if ! kill -0 "$(cat "$HOME/zorin/qemu.pid")" 2>/dev/null; then
-              echo "PC Virtual encerrado."
-              break
-            fi
-
-            if ! kill -0 "$(cat "$HOME/zorin/cloudflared.pid")" 2>/dev/null; then
-              echo "❌ O túnel caiu."
-              break
-            fi
-
-            if (( COUNT % 15 == 0 )); then
-              CPU_USAGE=$(ps -o %cpu= -p "$(cat "$HOME/zorin/qemu.pid")" | xargs || true)
-
-              echo "[$(date '+%H:%M:%S')] PC online"
-              echo "CPU QEMU: ${CPU_USAGE:-indisponível}%"
-              echo "Acesso: ${NOVNC_URL}/vnc.html"
-            fi
-
-            COUNT=$((COUNT + 1))
-            sleep 20
+            sleep 1
           done
 
-      # 9. Encerrar a máquina virtual
-      - name: "🛑 Encerrar QEMU"
-        if: ${{ always() && env.VM_STARTED == 'true' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
+          echo "Sessao finalizada ou limite de tempo atingido."
 
-          if [[ -S "$HOME/zorin/monitor.sock" ]]; then
-            echo "system_powerdown" |
-              socat - UNIX-CONNECT:"$HOME/zorin/monitor.sock" || true
-          fi
+      # ==========================================
+      # 10. PARAR PROCESSOS E SALVAR DISCO
+      # ==========================================
 
-          for i in $(seq 1 30); do
-            if [[ ! -f "$HOME/zorin/qemu.pid" ]] ||
-               ! kill -0 "$(cat "$HOME/zorin/qemu.pid")" 2>/dev/null; then
-              break
-            fi
-
-            sleep 2
-          done
-
-          if [[ -f "$HOME/zorin/qemu.pid" ]] &&
-             kill -0 "$(cat "$HOME/zorin/qemu.pid")" 2>/dev/null; then
-            echo "⚠️ Encerrando QEMU após o tempo de espera."
-            kill "$(cat "$HOME/zorin/qemu.pid")" 2>/dev/null || true
-            sleep 5
-          fi
-
-          echo "Encerramento concluído."
-
-      # 10. Compactar o disco para salvar
-      - name: "💾 Compactar disco virtual"
-        if: ${{ always() && env.VM_STARTED == 'true' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          if [[ -f "$HOME/zorin/qemu.pid" ]] &&
-             kill -0 "$(cat "$HOME/zorin/qemu.pid")" 2>/dev/null; then
-            echo "⚠️ QEMU ainda está ativo. Não será criado um save."
-            exit 0
-          fi
-
-          mkdir -p "$HOME/zorin-save"
-
-          rm -f \
-            "$HOME/zorin-save/zorin.qcow2.zst" \
-            "$HOME/zorin-save/zorin.size"
-
-          echo "Compactando o disco..."
-
-          qemu-img convert \
-            -f qcow2 \
-            -O qcow2 \
-            -o cluster_size=1M \
-            "$HOME/zorin/zorin.qcow2" \
-            "$HOME/zorin/zorin-compact.qcow2"
-
-          stat -c%s "$HOME/zorin/zorin-compact.qcow2" \
-            > "$HOME/zorin-save/zorin.size"
-
-          zstd \
-            -T0 \
-            -1 \
-            -f "$HOME/zorin/zorin-compact.qcow2" \
-            -o "$HOME/zorin-save/zorin.qcow2.zst"
-
-          rm -f "$HOME/zorin/zorin-compact.qcow2"
-
-          SIZE=$(stat -c%s "$HOME/zorin-save/zorin.qcow2.zst")
-
-          echo "Tamanho compactado: $((SIZE / 1000000)) MB"
-
-          if (( SIZE > 9800000000 )); then
-            echo "⚠️ Save maior que o limite de segurança do cache."
-            echo "O arquivo não será enviado ao cache."
-            exit 0
-          fi
-
-          echo "SAVE_READY=true" >> "$GITHUB_ENV"
-
-          echo "✅ Disco preparado para salvar."
-
-      # 11. Salvar disco no cache
-      - name: "☁️ Salvar disco no cache do GitHub"
-        id: save
-        if: ${{ always() && env.SAVE_READY == 'true' }}
-        uses: actions/cache/save@v4
-        with:
-          path: ~/zorin-save
-          key: zorin-disk-${{ github.run_id }}-${{ github.run_attempt }}
-
-      # 12. Encerrar serviços
-      - name: "🧹 Limpar serviços"
+      - name: Preparar backup do disco
         if: always()
         shell: bash
         run: |
-          echo "Encerrando serviços auxiliares..."
+          set -Eeuo pipefail
 
-          for FILE in \
-            "$HOME/zorin/novnc.pid" \
-            "$HOME/zorin/cloudflared.pid"; do
+          mkdir -p "$SAVE_DIR"
 
-            if [[ -f "$FILE" ]]; then
-              PID=$(cat "$FILE")
-              kill "$PID" 2>/dev/null || true
+          if [[ -f "$ZORIN_DIR/qemu.pid" ]]; then
+            QEMU_PID="$(cat "$ZORIN_DIR/qemu.pid")"
+
+            if kill -0 "$QEMU_PID" 2>/dev/null; then
+              echo "Encerrando QEMU para salvar o disco."
+
+              kill -TERM "$QEMU_PID" 2>/dev/null || true
+
+              for i in $(seq 1 30); do
+                if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+                  break
+                fi
+                sleep 1
+              done
+
+              if kill -0 "$QEMU_PID" 2>/dev/null; then
+                kill -KILL "$QEMU_PID" 2>/dev/null || true
+              fi
             fi
-          done
+          fi
+
+          if [[ -f "$ZORIN_DIR/cloudflared.pid" ]]; then
+            kill "$(cat "$ZORIN_DIR/cloudflared.pid")" 2>/dev/null || true
+          fi
+
+          if [[ -f "$ZORIN_DIR/novnc.pid" ]]; then
+            kill "$(cat "$ZORIN_DIR/novnc.pid")" 2>/dev/null || true
+          fi
+
+          if [[ -f "$VM_DISK" ]]; then
+            echo "Compactando disco virtual..."
+
+            rm -f "$SAVE_DIR/zorin.qcow2.zst"
+
+            if zstd -T0 -3 -f \
+              "$VM_DISK" \
+              -o "$SAVE_DIR/zorin.qcow2.zst"; then
+
+              echo "SAVE_READY=true" >> "$GITHUB_ENV"
+              echo "Backup compactado preparado."
+              ls -lh "$SAVE_DIR/zorin.qcow2.zst"
+            else
+              echo "ERRO: nao foi possivel compactar o disco."
+              echo "SAVE_READY=false" >> "$GITHUB_ENV"
+              exit 1
+            fi
+          else
+            echo "Disco nao encontrado; backup nao sera salvo."
+            echo "SAVE_READY=false" >> "$GITHUB_ENV"
+          fi
+
+      # ==========================================
+      # 11. SALVAR NO CACHE DO GITHUB
+      # ==========================================
+
+      - name: Salvar disco no cache
+        if: always() && env.SAVE_READY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /home/runner/zorin-save
+          key: extnobrasil-zorin-${{ github.ref_name }}-${{ github.run_id }}
+
+      # ==========================================
+      # 12. MOSTRAR LOG SE OCORRER ERRO
+      # ==========================================
+
+      - name: Mostrar logs de diagnostico
+        if: failure()
+        shell: bash
+        run: |
+          echo "=========================================="
+          echo "       DIAGNOSTICO EXT NOBRASIL"
+          echo "=========================================="
+
+          if [[ -f "$ZORIN_DIR/qemu.log" ]]; then
+            echo ""
+            echo "---- LOG DO QEMU ----"
+            tail -n 100 "$ZORIN_DIR/qemu.log" || true
+          fi
+
+          if [[ -f "$ZORIN_DIR/novnc.log" ]]; then
+            echo ""
+            echo "---- LOG DO NOVNC ----"
+            tail -n 50 "$ZORIN_DIR/novnc.log" || true
+          fi
+
+          if [[ -f "$ZORIN_DIR/cloudflared.log" ]]; then
+            echo ""
+            echo "---- LOG DO CLOUDFLARE ----"
+            tail -n 50 "$ZORIN_DIR/cloudflared.log" || true
+          fi
 
           echo ""
-          echo "=============================================="
-          echo "       EXTNOBRASIL PC GAMER [BETA]"
-          echo "=============================================="
-          echo "Execução encerrada."
-          echo "O próximo save depende do resultado do cache."
-          echo "=============================================="
+          echo "Verifique tambem o erro exibido nas etapas anteriores."
