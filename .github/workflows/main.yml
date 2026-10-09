@@ -1,262 +1,408 @@
-name: ZorinOS Gamer PC (High Performance)
+name: "🎮 ExtNoBrasil PC Gamer - Zorin OS [BETA]"
 
 on:
   workflow_dispatch:
     inputs:
       vnc_password:
-        description: "Senha VNC (6-8 chars)"
+        description: "Senha do VNC (1 a 8 letras ou números)"
         required: true
-      fresh_install:
-        description: "Instalacao nova (ignora o save)?"
-        type: boolean
-        default: false
-      target_fps:
-        description: "Foco de otimizacao"
-        type: choice
-        options:
-          - max_fps
-          - balanced
-        default: max_fps
+        type: string
+        default: "Ext2026"
 
 permissions:
   contents: read
-  actions: write
+
+concurrency:
+  group: extnobrasil-pc-gamer
+  cancel-in-progress: false
 
 jobs:
-  zorin-gamer-pc:
+  pc-virtual:
+    name: "🚀 Iniciar PC Virtual"
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
-
-    env:
-      DISK_SIZE: 80G
-      VNC_PASS: ${{ inputs.vnc_password }}
-      GH_TOKEN: ${{ github.token }}
-      TARGET_FPS: ${{ inputs.target_fps }}
-      QEMU_DIR: /home/runner/zorin-vm
-      SAVE_DIR: /home/runner/zorin-save
-      MAX_SECONDS: 19500
+    timeout-minutes: 350
 
     steps:
-      - name: Install packages
-        env:
-          DEBIAN_FRONTEND: noninteractive
+      - name: "🎨 Preparar ambiente"
+        shell: bash
         run: |
-          set -e
-          if [ "${#VNC_PASS}" -lt 6 ]; then
-            echo "ERRO: a senha recebida tem ${#VNC_PASS} caracteres; precisa ter de 6 a 8."
+          set -Eeuo pipefail
+
+          echo "=============================================="
+          echo "       EXTNOBRASIL PC GAMER [BETA]"
+          echo "=============================================="
+          echo "Preparando o ambiente virtual..."
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            qemu-system-x86 \
+            qemu-utils \
+            novnc \
+            websockify \
+            socat \
+            curl \
+            ca-certificates \
+            zstd
+
+          echo "✅ Dependências instaladas."
+
+      - name: "🔐 Validar configurações"
+        shell: bash
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+          ZORIN_ISO_URL: ${{ secrets.ZORIN_ISO_URL }}
+          VNC_PASSWORD: ${{ inputs.vnc_password }}
+        run: |
+          set -Eeuo pipefail
+
+          if [[ -z "$TAILSCALE_AUTH_KEY" ]]; then
+            echo "❌ ERRO: Configure o segredo TAILSCALE_AUTH_KEY."
             exit 1
           fi
-          echo "::add-mask::$VNC_PASS"
-          echo "START_TS=$(date +%s)" >> "$GITHUB_ENV"
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends \
-            qemu-system-x86 qemu-utils novnc websockify aria2 curl wget \
-            ca-certificates zstd socat
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
-            -O /home/runner/cloudflared
-          chmod +x /home/runner/cloudflared
 
-      - name: Restore saved disk
-        id: restore
-        if: ${{ !inputs.fresh_install }}
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/zorin-save
-          key: zorin-disk-nomatch-${{ github.run_id }}
-          restore-keys: |
-            zorin-disk-
-
-      - name: Prepare disk and KVM
-        run: |
-          set -e
-          mkdir -p "$QEMU_DIR" "$SAVE_DIR"
-
-          # libera espaco (apaga ferramentas pre-instaladas do runner)
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
-            /opt/hostedtoolcache/CodeQL /usr/local/share/boost >/dev/null 2>&1 || true
-          df -h / | tail -1
-
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm || true
-          if [ -w /dev/kvm ]; then
-            echo "ACCEL=kvm" >> "$GITHUB_ENV"
-            echo "CPU_OPT=host" >> "$GITHUB_ENV"
-            echo "KVM disponivel."
-          else
-            echo "ACCEL=tcg,thread=multi" >> "$GITHUB_ENV"
-            echo "CPU_OPT=max" >> "$GITHUB_ENV"
-            echo "AVISO: sem KVM (repositorio privado). Vai ficar lento. Deixe o repo PUBLICO."
+          if [[ -z "$ZORIN_ISO_URL" ]]; then
+            echo "❌ ERRO: Configure o segredo ZORIN_ISO_URL."
+            exit 1
           fi
 
-          # Video: placa VGA padrao (a mais compativel; sem GPU fisica nao ha aceleracao 3D)
-          echo "GPU_ARGS=-vga std" >> "$GITHUB_ENV"
-
-          # swap extra no host (evita o runner matar a VM por falta de memoria)
-          sudo fallocate -l 8G /swapfile-extra \
-            && sudo chmod 600 /swapfile-extra \
-            && sudo mkswap /swapfile-extra >/dev/null \
-            && sudo swapon /swapfile-extra || true
-
-          # ajustes do host
-          echo madvise | sudo tee /sys/kernel/mm/transparent_hugepage/enabled >/dev/null || true
-          sudo sysctl -qw vm.swappiness=10 vm.dirty_ratio=40 vm.dirty_background_ratio=10 || true
-
-          # disco: restaura o salvo (se for seguro) ou cria um novo
-          ZST="$SAVE_DIR/zorin.qcow2.zst"
-          SZ_FILE="$SAVE_DIR/zorin.size"
-          RESTORE_OK=false
-          if [ -f "$ZST" ]; then
-            if [ -f "$SZ_FILE" ]; then
-              NEED=$(cat "$SZ_FILE")
-              AVAIL=$(df --output=avail -B1 / | tail -1)
-              if [ "$NEED" -lt $((AVAIL - 15000000000)) ]; then
-                RESTORE_OK=true
-              else
-                echo "Save grande demais pro espaco livre: ignorando."
-              fi
-            else
-              echo "Save antigo (formato incompativel, lotaria o disco): ignorando."
-            fi
+          if [[ ! "$VNC_PASSWORD" =~ ^[a-zA-Z0-9]{1,8}$ ]]; then
+            echo "❌ A senha precisa ter de 1 a 8 letras ou números."
+            exit 1
           fi
 
-          if [ "$RESTORE_OK" = true ]; then
-            echo "Restaurando disco salvo..."
-            zstd -d --rm -f "$ZST" -o "$QEMU_DIR/zorin.qcow2"
-            echo "RESTORED=true" >> "$GITHUB_ENV"
-          else
-            rm -rf "$SAVE_DIR"/*
-            qemu-img create -f qcow2 -o lazy_refcounts=on,cluster_size=1M "$QEMU_DIR/zorin.qcow2" "$DISK_SIZE"
-            echo "RESTORED=false" >> "$GITHUB_ENV"
-          fi
-          ls -lh "$QEMU_DIR/zorin.qcow2"
+          echo "✅ Configurações validadas."
 
-      - name: Download Zorin ISO
+      - name: "🌐 Conectar ao Tailscale"
+        shell: bash
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
-          set -e
-          # tenta 18.1 e depois 18 (para o visual Core, troque Lite por Core)
-          URLS="https://distro.ibiblio.org/zorinos/18/Zorin-OS-18.1-Lite-64-bit.iso https://distro.ibiblio.org/zorinos/18/Zorin-OS-18-Lite-64-bit.iso"
-          ISO_OK=false
-          for U in $URLS; do
-            echo "Baixando $U"
-            rm -f "$QEMU_DIR/zorin.iso"
-            aria2c -x 4 -s 4 -k 1M --console-log-level=warn \
-              -d "$QEMU_DIR" -o zorin.iso "$U" || true
-            SIZE=$(stat -c%s "$QEMU_DIR/zorin.iso" 2>/dev/null || echo 0)
-            if [ "$SIZE" -gt 1000000000 ]; then ISO_OK=true; break; fi
-            echo "Falhou (tamanho: $SIZE). Tentando o proximo link..."
-          done
-          [ "$ISO_OK" = true ] || { echo "ERRO: nao consegui baixar a ISO"; exit 1; }
+          set -Eeuo pipefail
 
-      - name: Create QEMU Launcher
-        run: |
-          AVAIL_MB=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
-          if [ "$TARGET_FPS" = "max_fps" ]; then
-            VM_RAM_MB=$((AVAIL_MB - 1024))
-          else
-            VM_RAM_MB=$((AVAIL_MB - 2048))
-          fi
-          [ "$VM_RAM_MB" -gt 15360 ] && VM_RAM_MB=15360
-          [ "$VM_RAM_MB" -lt 1536 ] && VM_RAM_MB=1536
+          curl -fsSL https://tailscale.com/install.sh | sh
 
-          VM_CPUS=$(nproc)
+          sudo tailscale up \
+            --auth-key="$TAILSCALE_AUTH_KEY" \
+            --hostname="extnobrasil-pc-gamer" \
+            --accept-dns=false
 
-          echo "VM_RAM_MB=$VM_RAM_MB" >> "$GITHUB_ENV"
-          echo "VM_CPUS=$VM_CPUS" >> "$GITHUB_ENV"
-          echo "VM com ${VM_RAM_MB} MB e ${VM_CPUS} CPUs"
-
-          cat > "$QEMU_DIR/start.sh" <<EOF
-          #!/usr/bin/env bash
-          exec qemu-system-x86_64 \\
-            -machine q35 \\
-            -accel ${ACCEL} \\
-            -cpu ${CPU_OPT} \\
-            -smp ${VM_CPUS} \\
-            -m ${VM_RAM_MB}M \\
-            -object iothread,id=io0 \\
-            -drive file=$QEMU_DIR/zorin.qcow2,if=none,id=hd0,format=qcow2,cache=writeback,aio=threads,discard=unmap,l2-cache-size=32M \\
-            -device virtio-blk-pci,drive=hd0,iothread=io0,num-queues=${VM_CPUS} \\
-            -cdrom $QEMU_DIR/zorin.iso \\
-            -boot order=cd,menu=off \\
-            ${GPU_ARGS} \\
-            -device qemu-xhci -device usb-tablet \\
-            -object secret,id=vncpw,data=\${VNC_PASS} \\
-            -vnc 127.0.0.1:0,password-secret=vncpw \\
-            -monitor unix:$QEMU_DIR/monitor.sock,server,nowait \\
-            -netdev user,id=net0 \\
-            -device virtio-net-pci,netdev=net0 \\
-            -device virtio-balloon-pci \\
-            -device virtio-rng-pci \\
-            -rtc base=localtime
-          EOF
-          chmod +x "$QEMU_DIR/start.sh"
-
-      - name: Start VM
-        run: |
-          nohup "$QEMU_DIR/start.sh" > "$QEMU_DIR/qemu.log" 2>&1 &
-          echo "VM_STARTED=true" >> "$GITHUB_ENV"
           for i in $(seq 1 30); do
-            sleep 2
-            if ss -ltn | grep -q "127.0.0.1:5900"; then
-              echo "VNC pronto."
+            if sudo tailscale ip -4 2>/dev/null | grep -qE '^[0-9]'; then
               break
             fi
+            sleep 2
           done
-          if ! pgrep -f qemu-system-x86_64 > /dev/null || ! ss -ltn | grep -q "127.0.0.1:5900"; then
-            echo "ERRO: QEMU nao iniciou."
-            cat "$QEMU_DIR/qemu.log"
+
+          TAILSCALE_IP="$(sudo tailscale ip -4 | head -n 1)"
+
+          if [[ -z "$TAILSCALE_IP" ]]; then
+            echo "❌ Não foi possível obter o IP do Tailscale."
             exit 1
           fi
-          nohup websockify --web=/usr/share/novnc 127.0.0.1:6080 127.0.0.1:5900 > "$QEMU_DIR/novnc.log" 2>&1 &
+
+          echo "TAILSCALE_IP=$TAILSCALE_IP" >> "$GITHUB_ENV"
+
+          echo "✅ Tailscale conectado."
+          echo "📡 IP privado: $TAILSCALE_IP"
+
+      - name: "💿 Baixar Zorin OS"
+        shell: bash
+        env:
+          ZORIN_ISO_URL: ${{ secrets.ZORIN_ISO_URL }}
+        run: |
+          set -Eeuo pipefail
+
+          echo "=============================================="
+          echo "              DOWNLOAD DO SISTEMA"
+          echo "=============================================="
+
+          curl \
+            --fail \
+            --location \
+            --retry 3 \
+            --retry-delay 3 \
+            --connect-timeout 30 \
+            --output zorin.iso \
+            "$ZORIN_ISO_URL"
+
+          if [[ ! -s zorin.iso ]]; then
+            echo "❌ O arquivo ISO está vazio."
+            exit 1
+          fi
+
+          file zorin.iso || true
+
+          echo "✅ Download concluído."
+          du -h zorin.iso
+
+      - name: "⚙️ Configurar PC Virtual"
+        shell: bash
+        env:
+          VNC_PASSWORD: ${{ inputs.vnc_password }}
+        run: |
+          set -Eeuo pipefail
+
+          echo "=============================================="
+          echo "        CONFIGURAÇÃO DO PC VIRTUAL"
+          echo "=============================================="
+
+          # Disco virtual de 145 GB.
+          qemu-img create \
+            -f qcow2 \
+            zorin-disk.qcow2 \
+            145G
+
+          # Usar KVM quando estiver disponível.
+          if [[ -c /dev/kvm && -r /dev/kvm && -w /dev/kvm ]]; then
+            ACCEL="kvm"
+            CPU_MODEL="host"
+            echo "✅ KVM disponível."
+          else
+            ACCEL="tcg"
+            CPU_MODEL="max"
+            echo "⚠️ KVM indisponível: usando emulação TCG."
+            echo "A emulação pode deixar o sistema muito lento."
+          fi
+
+          echo "ACCEL=$ACCEL" >> "$GITHUB_ENV"
+          echo "CPU_MODEL=$CPU_MODEL" >> "$GITHUB_ENV"
+
+          # O runner pode não ter RAM suficiente para 6 GB.
+          # 4 GB é uma configuração mais prudente.
+          echo "💾 RAM virtual: 4 GB"
+          echo "🧠 CPUs virtuais: 2"
+          echo "💿 Disco virtual: 145 GB"
+          echo "🖥️ Vídeo: adaptador VGA virtual"
+          echo "🌐 Rede: QEMU user-mode"
+          echo "⚙️ Aceleração: $ACCEL"
+
+          # A senha não é impressa no log.
+          printf '%s' "$VNC_PASSWORD" > "$RUNNER_TEMP/vnc-password"
+          chmod 600 "$RUNNER_TEMP/vnc-password"
+
+          echo "✅ PC Virtual configurado."
+
+      - name: "🖥️ Iniciar QEMU e noVNC"
+        shell: bash
+        env:
+          VNC_PASSWORD: ${{ inputs.vnc_password }}
+        run: |
+          set -Eeuo pipefail
+
+          echo "=============================================="
+          echo "         INICIANDO O PC VIRTUAL"
+          echo "=============================================="
+
+          # O monitor QEMU permite configurar a senha do VNC.
+          sudo rm -f /tmp/extnobrasil-qemu-monitor.sock
+
+          qemu-system-x86_64 \
+            -name "ExtNoBrasil-PC-Gamer" \
+            -machine "q35,accel=${ACCEL}" \
+            -cpu "$CPU_MODEL" \
+            -smp 2,sockets=1,cores=2,threads=1 \
+            -m 4G \
+            -drive file=zorin-disk.qcow2,format=qcow2,if=virtio \
+            -drive id=cdrom,file=zorin.iso,media=cdrom,if=none,readonly=on \
+            -device ide-cd,drive=cdrom,bus=ide.1 \
+            -boot menu=on,order=d \
+            -vga std \
+            -device virtio-net-pci,netdev=net0 \
+            -netdev user,id=net0 \
+            -display none \
+            -monitor unix:/tmp/extnobrasil-qemu-monitor.sock,server=on,wait=off \
+            -vnc 127.0.0.1:0,password=on \
+            -no-reboot \
+            > "$RUNNER_TEMP/qemu.log" 2>&1 &
+
+          QEMU_PID=$!
+          echo "$QEMU_PID" > "$RUNNER_TEMP/qemu.pid"
+
+          echo "Aguardando inicialização do QEMU..."
+
+          for i in $(seq 1 60); do
+            if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+              echo "❌ O QEMU encerrou inesperadamente."
+              cat "$RUNNER_TEMP/qemu.log" || true
+              exit 1
+            fi
+
+            if [[ -S /tmp/extnobrasil-qemu-monitor.sock ]]; then
+              break
+            fi
+
+            sleep 2
+          done
+
+          if [[ ! -S /tmp/extnobrasil-qemu-monitor.sock ]]; then
+            echo "❌ O monitor QEMU não foi iniciado."
+            cat "$RUNNER_TEMP/qemu.log" || true
+            exit 1
+          fi
+
+          # Configurar a senha VNC sem mostrá-la no log.
+          printf 'change vnc password %s\n' "$VNC_PASSWORD" |
+            socat - UNIX-CONNECT:/tmp/extnobrasil-qemu-monitor.sock \
+            > "$RUNNER_TEMP/qemu-password.log" 2>&1 || true
+
+          # Iniciar o servidor web no endereço acessível pela rede privada.
+          websockify \
+            --web=/usr/share/novnc/ \
+            0.0.0.0:6080 \
+            127.0.0.1:5900 \
+            > "$RUNNER_TEMP/novnc.log" 2>&1 &
+
+          echo $! > "$RUNNER_TEMP/novnc.pid"
+
           sleep 3
 
-      - name: Start tunnel
-        run: |
-          nohup /home/runner/cloudflared tunnel --url http://127.0.0.1:6080 --no-autoupdate \
-            > "$QEMU_DIR/cloudflare.log" 2>&1 &
+          if ! kill -0 "$(cat "$RUNNER_TEMP/novnc.pid")" 2>/dev/null; then
+            echo "❌ O noVNC não iniciou."
+            cat "$RUNNER_TEMP/novnc.log" || true
+            exit 1
+          fi
 
-          URL=""
-          for i in $(seq 1 40); do
-            sleep 2
-            URL="$(grep -oE 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' "$QEMU_DIR/cloudflare.log" | grep -v '^https://api\.' | tail -n1)"
-            if [ -n "$URL" ] && grep -q "Registered tunnel connection" "$QEMU_DIR/cloudflare.log"; then
+          echo "✅ QEMU iniciado."
+          echo "✅ noVNC iniciado."
+
+      - name: "🏆 Créditos e informações do PC Virtual"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          clear || true
+
+          echo ""
+          echo "╔══════════════════════════════════════════════╗"
+          echo "║           EXT NOBRASIL PC GAMER             ║"
+          echo "║                  BETA                       ║"
+          echo "╚══════════════════════════════════════════════╝"
+          echo ""
+
+          echo "             || CRÉDITOS ||"
+          echo ""
+          echo "• Criador - ExtNoBrasil (ExT)"
+          echo "• Perfil do Discord - Brasil_kill0"
+          echo "• Dia De Criação - Sexta-feira 9 de outubro 2026"
+          echo ""
+
+          echo "=============================================="
+          echo "     || DETALHES DO PC VIRTUAL [BETA] ||"
+          echo "=============================================="
+          echo ""
+          echo "• Sistema: Zorin OS (ISO fornecida)"
+          echo "• Virtualizador: QEMU"
+          echo "• Processador: 2 CPUs virtuais"
+          echo "• Memória RAM atribuída: 4 GB"
+          echo "• Disco virtual: 145 GB (QCOW2)"
+          echo "• Vídeo: adaptador VGA virtual"
+          echo "• Aceleração: ${ACCEL}"
+          echo "• Rede: QEMU user-mode"
+          echo "• Acesso remoto: noVNC"
+          echo "• Rede privada: Tailscale"
+          echo "• Porta web: 6080"
+          echo "• Porta VNC local: 5900"
+          echo "• Duração máxima aproximada: 330 minutos"
+          echo "• Estado: sessão temporária"
+          echo ""
+          echo "=============================================="
+          echo "             INFORMAÇÕES IMPORTANTES"
+          echo "=============================================="
+          echo ""
+          echo "1. O disco virtual não é salvo automaticamente"
+          echo "   para a próxima execução deste workflow."
+          echo ""
+          echo "2. O espaço de 145 GB é virtual, não uma"
+          echo "   garantia de 145 GB físicos disponíveis."
+          echo ""
+          echo "3. A GPU é virtual. Não há garantia de"
+          echo "   aceleração 3D nem de FPS para jogos."
+          echo ""
+          echo "4. Para acessar pelo celular, conecte o"
+          echo "   aplicativo Tailscale à mesma rede privada."
+          echo ""
+          echo "5. Se o sistema iniciar pelo instalador, será"
+          echo "   necessário instalar o Zorin no disco virtual."
+          echo ""
+          echo "=============================================="
+          echo "          🔗 LINK DE ACESSO NO FINAL"
+          echo "=============================================="
+          echo ""
+
+          echo "=============================================="
+          echo "              🔗 LINK DO NOVNC"
+          echo "=============================================="
+          echo ""
+          echo "Acesse pelo navegador do celular:"
+          echo ""
+          echo "http://${TAILSCALE_IP}:6080/vnc.html?autoconnect=1&resize=scale"
+          echo ""
+          echo "Senha VNC: a senha informada ao iniciar o workflow."
+          echo ""
+          echo "⚠️ O celular precisa estar conectado ao Tailscale."
+          echo ""
+
+      - name: "⏳ Manter o PC Virtual ligado"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          echo "=============================================="
+          echo "          PC VIRTUAL EM EXECUÇÃO"
+          echo "=============================================="
+          echo "A sessão ficará ativa enquanto o workflow"
+          echo "estiver executando e os serviços funcionarem."
+          echo ""
+
+          START_TIME=$(date +%s)
+          MAX_SECONDS=$((330 * 60))
+
+          while true; do
+            if [[ -f "$RUNNER_TEMP/qemu.pid" ]]; then
+              QEMU_PID=$(cat "$RUNNER_TEMP/qemu.pid")
+
+              if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+                echo "❌ O QEMU encerrou."
+                cat "$RUNNER_TEMP/qemu.log" || true
+                exit 1
+              fi
+            fi
+
+            ELAPSED=$(( $(date +%s) - START_TIME ))
+
+            if (( ELAPSED >= MAX_SECONDS )); then
+              echo "⏰ Tempo máximo da sessão atingido."
               break
             fi
+
+            REMAINING=$((MAX_SECONDS - ELAPSED))
+            echo "⏳ Sessão ativa. Tempo restante: $((REMAINING / 60)) minutos."
+
+            sleep 300
           done
-          [ -n "$URL" ] || { echo "ERRO: link nao gerado"; cat "$QEMU_DIR/cloudflare.log"; exit 1; }
 
-          for i in $(seq 1 30); do
-            CODE="$(curl -s -o /dev/null -w '%{http_code}' "$URL/vnc.html" || true)"
-            [ "$CODE" = "200" ] && break
-            sleep 2
-          done
-          echo "Teste do link: HTTP $CODE"
-          echo "NOVNC_URL=$URL" >> "$GITHUB_ENV"
-
-          # link reserva (dominio diferente)
-          ( tail -f /dev/null | nohup ssh -o StrictHostKeyChecking=no \
-              -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes \
-              -R 80:127.0.0.1:6080 nokey@localhost.run \
-              > "$QEMU_DIR/lhr.log" 2>&1 ) &
-          ALT=""
-          for i in $(seq 1 15); do
-            sleep 2
-            ALT="$(grep -oE 'https://[a-zA-Z0-9]+\.lhr\.life' "$QEMU_DIR/lhr.log" | tail -n1)"
-            [ -n "$ALT" ] && break
-          done
-          [ -n "$ALT" ] || ALT="(nao gerado)"
-
-          echo "=============================================="
-          echo "  ZORIN GAMER PC"
-          echo "  Abra: $URL/vnc.html"
-          echo "  Link reserva: $ALT/vnc.html"
-          echo "  ${VM_CPUS} vCPU | ${VM_RAM_MB} MB RAM | ${DISK_SIZE} disco | ${ACCEL%%,*}"
-          echo "  Disco restaurado do save: ${RESTORED}"
-          echo "  PRA SALVAR: desligue o Zorin por dentro (menu > Sair > Desligar)."
-          echo "=============================================="
-
-      - name: Keep workflow alive
+      - name: "🛑 Encerrar serviços"
+        if: always()
+        shell: bash
         run: |
+          echo "Encerrando o PC Virtual..."
+
+          if [[ -f "$RUNNER_TEMP/novnc.pid" ]]; then
+            kill "$(cat "$RUNNER_TEMP/novnc.pid")" 2>/dev/null || true
+          fi
+
+          if [[ -f "$RUNNER_TEMP/qemu.pid" ]]; then
+            kill "$(cat "$RUNNER_TEMP/qemu.pid")" 2>/dev/null || true
+          fi
+
+          echo ""
+          echo "=============================================="
+          echo "          EXT NOBRASIL PC GAMER"
+          echo "=============================================="
+          echo "Sessão encerrada."
+          echo "O disco virtual desta execução é temporário."
+          echo "=============================================="un: |
           # se voce cancelar a execucao, ja pede o desligamento na hora
           on_cancel() {
             echo "Cancelamento detectado: pedindo desligamento..."
